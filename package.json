@@ -1,0 +1,39 @@
+{
+  "name": "arrow-school-saas",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "tsx scripts/migrate.ts"
+  },
+  "dependencies": {
+    "argon2": "^0.41.1",
+    "bullmq": "^5.34.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "ioredis": "^5.4.2",
+    "jsonwebtoken": "^9.0.2",
+    "kysely": "^0.28.2",
+    "pg": "^8.13.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

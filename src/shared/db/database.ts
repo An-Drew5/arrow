@@ -1,6 +1,6 @@
-import { Kysely, PostgresDialect } from 'kysely';
-import { Pool } from 'pg';
-import { env } from '../config/env';
+import { Kysely, PostgresDialect } from "kysely";
+import { Pool } from "pg";
+import { env } from "../config/env";
 
 export interface Database {
   [table: string]: Record<string, unknown>;

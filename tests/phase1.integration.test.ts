@@ -696,6 +696,20 @@ describe("Phase 1 tenant isolation", () => {
       });
       expect(registered.status).toBe(201);
       schoolId = registered.body.schoolId as string;
+      const schemes = await inMigrationSchool(schoolId, (client) =>
+        client.query<{ name: string; band_count: number }>(`
+          SELECT gs.name, count(gb.id)::int AS band_count
+          FROM grading_schemes gs
+          LEFT JOIN grade_bands gb ON gb.school_id = gs.school_id AND gb.scheme_id = gs.id
+          WHERE gs.school_id = $1
+          GROUP BY gs.id
+          ORDER BY gs.name
+        `, [schoolId]),
+      );
+      expect(schemes.rows).toEqual([
+        { name: "JHS nine-point", band_count: 9 },
+        { name: "Primary A-F", band_count: 7 },
+      ]);
 
       const pendingLogin = await request(app).post("/api/v1/auth/login").send({
         identifier: email,
@@ -725,6 +739,9 @@ describe("Phase 1 tenant isolation", () => {
       if (schoolId) {
         await inMigrationSchool(schoolId, async (client) => {
           await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM grade_bands WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM grading_scheme_overrides WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM grading_schemes WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM membership_roles WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM role_permissions WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM roles WHERE school_id = $1", [schoolId]);

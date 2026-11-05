@@ -1,6 +1,7 @@
 import express from "express";
 import { authRoutes } from "./auth/routes";
 import { auditRoutes } from "./audit/routes";
+import { academicsRoutes } from "./academics/routes";
 import { peopleRoutes } from "./people/routes";
 import { db } from "./shared/db/database";
 import { errorHandler } from "./shared/middleware/errors";
@@ -16,6 +17,7 @@ app.use("/api/v1", tenantRoutes);
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1", peopleRoutes);
 app.use("/api/v1", auditRoutes);
+app.use("/api/v1", academicsRoutes);
 app.use("/api/v1/platform", platformRoutes);
 
 app.get("/api/v1/health", async (_request, response) => {

@@ -686,6 +686,11 @@ describe("Phase 1 tenant isolation", () => {
     const slug = `registration-${randomUUID()}`;
     const email = `admin-${slug}@example.test`;
     let schoolId: string | undefined;
+    let academicYearId: string | undefined;
+    let termId: string | undefined;
+    let classId: string | undefined;
+    let subjectId: string | undefined;
+    let studentId: string | undefined;
 
     try {
       const registered = await request(app).post("/api/v1/schools").send({
@@ -735,10 +740,101 @@ describe("Phase 1 tenant isolation", () => {
         .set("Authorization", `Bearer ${login.body.accessToken}`);
       expect(me.status).toBe(200);
       expect(me.body.school.id).toBe(schoolId);
+
+      const authorization = { Authorization: `Bearer ${login.body.accessToken}` };
+      const year = await request(app)
+        .post("/api/v1/academic-years")
+        .set(authorization)
+        .send({ name: "2025-2026", startDate: "2025-09-01", endDate: "2026-07-31" });
+      expect(year.status).toBe(201);
+      academicYearId = year.body.id as string;
+
+      const term = await request(app)
+        .post(`/api/v1/academic-years/${academicYearId}/terms`)
+        .set(authorization)
+        .send({ name: "Term 1", termNumber: 1, startDate: "2025-09-01", endDate: "2025-12-19" });
+      expect(term.status).toBe(201);
+      termId = term.body.id as string;
+
+      const classroom = await request(app)
+        .post("/api/v1/classes")
+        .set(authorization)
+        .send({ academicYearId, name: "Basic 1 A", level: 1, stream: "A" });
+      expect(classroom.status).toBe(201);
+      classId = classroom.body.id as string;
+
+      const subject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "Mathematics", code: `M-${slug.slice(-8)}` });
+      expect(subject.status).toBe(201);
+      subjectId = subject.body.id as string;
+
+      const classSubject = await request(app)
+        .post(`/api/v1/classes/${classId}/subjects`)
+        .set(authorization)
+        .send({ subjectId });
+      expect(classSubject.status).toBe(201);
+
+      const student = await request(app)
+        .post("/api/v1/students")
+        .set(authorization)
+        .send({
+          admissionNo: `ADM-${slug.slice(-8)}`,
+          firstName: "Ama",
+          lastName: "Mensah",
+          dateOfBirth: "2018-03-14",
+          gender: "female",
+        });
+      expect(student.status).toBe(201);
+      studentId = student.body.id as string;
+
+      const studentDetails = await request(app)
+        .get(`/api/v1/students/${studentId}`)
+        .set(authorization);
+      expect(studentDetails.status).toBe(200);
+      expect(studentDetails.body.dateOfBirth).toBe("2018-03-14");
+
+      const guardian = await request(app)
+        .post(`/api/v1/students/${studentId}/guardians`)
+        .set(authorization)
+        .send({ name: "Kofi Mensah", relationship: "parent", phone: "+233201234567", isPrimary: true });
+      expect(guardian.status).toBe(201);
+      const guardians = await request(app)
+        .get(`/api/v1/students/${studentId}/guardians`)
+        .set(authorization);
+      expect(guardians.status).toBe(200);
+      expect(guardians.body.items[0].phone).toBe("+233201234567");
+
+      const enrollment = await request(app)
+        .post(`/api/v1/students/${studentId}/enrollments`)
+        .set(authorization)
+        .send({ academicYearId, classId });
+      expect(enrollment.status).toBe(201);
     } finally {
       if (schoolId) {
         await inMigrationSchool(schoolId, async (client) => {
           await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
+          if (studentId) {
+            await client.query("DELETE FROM guardians WHERE student_id = $1", [studentId]);
+            await client.query("DELETE FROM enrollments WHERE student_id = $1", [studentId]);
+            await client.query("DELETE FROM students WHERE id = $1", [studentId]);
+          }
+          if (classId) {
+            await client.query("DELETE FROM class_subjects WHERE class_id = $1", [classId]);
+          }
+          if (termId) {
+            await client.query("DELETE FROM terms WHERE id = $1", [termId]);
+          }
+          if (classId) {
+            await client.query("DELETE FROM classes WHERE id = $1", [classId]);
+          }
+          if (subjectId) {
+            await client.query("DELETE FROM subjects WHERE id = $1", [subjectId]);
+          }
+          if (academicYearId) {
+            await client.query("DELETE FROM academic_years WHERE id = $1", [academicYearId]);
+          }
           await client.query("DELETE FROM grade_bands WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM grading_scheme_overrides WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM grading_schemes WHERE school_id = $1", [schoolId]);

@@ -1,5 +1,6 @@
 export const permissions = [
   "school:manage",
+  "academics:manage",
   "users:manage",
   "roles:manage",
   "audit:read",
@@ -10,6 +11,9 @@ export const permissions = [
   "attendance:write",
   "analytics:read",
   "grading:manage",
+  "results:compute",
+  "terms:lock",
+  "imports:run",
 ] as const;
 
 export type Permission = (typeof permissions)[number];

@@ -36,14 +36,36 @@ const fixture = {
   slugB: `school-b-${randomUUID()}`,
 };
 
-const tenantTables = [
+const probeTables = [
   "memberships",
   "roles",
   "role_permissions",
   "membership_roles",
   "audit_log",
 ] as const;
+const tenantTables = [
+  ...probeTables,
+  "academic_years",
+  "terms",
+  "classes",
+  "subjects",
+  "class_subjects",
+  "students",
+  "guardians",
+  "enrollments",
+  "teacher_assignments",
+  "grading_schemes",
+  "grading_scheme_overrides",
+  "grade_bands",
+  "assessments",
+  "scores",
+  "score_versions",
+  "term_results",
+  "attendance",
+  "import_jobs",
+] as const;
 type TenantTable = (typeof tenantTables)[number];
+type ProbeTable = (typeof probeTables)[number];
 type ProbeOperation = "select" | "insert" | "update" | "delete";
 
 interface Probe {
@@ -58,7 +80,7 @@ interface Probe {
 }
 
 let tokenA: string;
-const probes: Record<TenantTable, Probe> = {
+const probes: Record<ProbeTable, Probe> = {
   memberships: {
     select: async (id, tx) =>
       (await sql`SELECT id FROM memberships WHERE id = ${id}::uuid`.execute(tx))
@@ -194,10 +216,10 @@ probeApi.post(
   "/probe/:table/:operation",
   tenantContext,
   asyncHandler(async (request, response) => {
-    const table = request.params.table as TenantTable;
+    const table = request.params.table as ProbeTable;
     const operation = request.params.operation as ProbeOperation;
     if (
-      !tenantTables.includes(table) ||
+      !probeTables.includes(table) ||
       !["select", "insert", "update", "delete"].includes(operation)
     ) {
       response
@@ -385,13 +407,31 @@ describe("Phase 1 tenant isolation", () => {
       ORDER BY c.relname
     `);
     const expected = [
+      "academic_years",
+      "assessments",
+      "attendance",
       "audit_log",
+      "class_subjects",
+      "classes",
+      "enrollments",
+      "grade_bands",
+      "grading_scheme_overrides",
+      "grading_schemes",
+      "guardians",
+      "import_jobs",
       "memberships",
       "membership_roles",
       "refresh_tokens",
       "role_permissions",
       "roles",
+      "score_versions",
+      "scores",
+      "students",
       "schools",
+      "subjects",
+      "teacher_assignments",
+      "term_results",
+      "terms",
       "users",
     ].sort();
     expect(tables.rows.map((row) => row.relname)).toEqual(expected);
@@ -467,10 +507,10 @@ describe("Phase 1 tenant isolation", () => {
     }
   });
 
-  it.each(tenantTables)(
+  it.each(probeTables)(
     "blocks direct school B SELECT/INSERT/UPDATE/DELETE on %s",
     async (table) => {
-      const targetIds: Record<TenantTable, string> = {
+      const targetIds: Record<ProbeTable, string> = {
         memberships: fixture.membershipB,
         roles: fixture.roleB,
         role_permissions: fixture.roleB,
@@ -511,10 +551,10 @@ describe("Phase 1 tenant isolation", () => {
     },
   );
 
-  it.each(tenantTables)(
+  it.each(probeTables)(
     "blocks school B CRUD through the tenant API transaction on %s",
     async (table) => {
-      const targetIds: Record<TenantTable, string> = {
+      const targetIds: Record<ProbeTable, string> = {
         memberships: fixture.membershipB,
         roles: fixture.roleB,
         role_permissions: fixture.roleB,

@@ -35,6 +35,12 @@ interface LoginRow {
   membership_status: string | null;
 }
 
+type LoginUserRow = Pick<
+  LoginRow,
+  "user_id" | "email" | "password_hash" | "user_status"
+>;
+type LoginMembershipRow = Omit<LoginRow, keyof LoginUserRow>;
+
 interface StoredRefreshToken {
   id: string;
   user_id: string;
@@ -106,25 +112,47 @@ export async function login(
   input: LoginInput,
 ): Promise<LoginResult> {
   const identifier = input.identifier.trim().toLowerCase();
-  const result = await sql<LoginRow>`
-    SELECT
-      u.id AS user_id,
-      u.email,
-      u.password_hash,
-      u.status AS user_status,
-      m.id AS membership_id,
-      s.id AS school_id,
-      s.slug AS school_slug,
-      s.name AS school_name,
-      s.status AS school_status,
-      m.status AS membership_status
-    FROM users u
-    LEFT JOIN memberships m ON m.user_id = u.id
-    LEFT JOIN schools s ON s.id = m.school_id
-    WHERE lower(u.email) = ${identifier} OR u.phone = ${input.identifier.trim()}
-    ORDER BY s.slug
+  const userResult = await sql<LoginUserRow>`
+    SELECT id AS user_id, email, password_hash, status AS user_status
+    FROM users
+    WHERE lower(email) = ${identifier} OR phone = ${input.identifier.trim()}
+    ORDER BY created_at
+    LIMIT 1
   `.execute(tx);
-  const rows = result.rows;
+  const found = userResult.rows[0];
+
+  let rows: LoginRow[] = [];
+  if (found) {
+    await sql`SELECT set_config('app.login_user_id', ${found.user_id}, true)`
+      .execute(tx);
+    const membershipResult = await sql<LoginMembershipRow>`
+      SELECT
+        m.id AS membership_id,
+        s.id AS school_id,
+        s.slug AS school_slug,
+        s.name AS school_name,
+        s.status AS school_status,
+        m.status AS membership_status
+      FROM memberships m
+      JOIN schools s ON s.id = m.school_id
+      WHERE m.user_id = ${found.user_id}::uuid
+      ORDER BY s.slug
+    `.execute(tx);
+    rows =
+      membershipResult.rows.length > 0
+        ? membershipResult.rows.map((membership) => ({ ...found, ...membership }))
+        : [
+            {
+              ...found,
+              membership_id: null,
+              school_id: null,
+              school_slug: null,
+              school_name: null,
+              school_status: null,
+              membership_status: null,
+            },
+          ];
+  }
   const user = rows[0];
 
   let passwordValid = false;

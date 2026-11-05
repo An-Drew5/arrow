@@ -240,7 +240,9 @@ async function inMigrationSchool<T>(
   const client = await migrationPool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT set_config('app.school_id', $1, true)", [schoolId]);
+    await client.query("SELECT set_config('app.school_id', $1, true)", [
+      schoolId,
+    ]);
     const result = await callback(client);
     await client.query("COMMIT");
     return result;
@@ -333,11 +335,19 @@ async function createFixtures(): Promise<void> {
 async function cleanupFixtures(): Promise<void> {
   for (const schoolId of [fixture.schoolA, fixture.schoolB]) {
     await inMigrationSchool(schoolId, async (client) => {
-      await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
-      await client.query("DELETE FROM membership_roles WHERE school_id = $1", [schoolId]);
-      await client.query("DELETE FROM role_permissions WHERE school_id = $1", [schoolId]);
+      await client.query("DELETE FROM audit_log WHERE school_id = $1", [
+        schoolId,
+      ]);
+      await client.query("DELETE FROM membership_roles WHERE school_id = $1", [
+        schoolId,
+      ]);
+      await client.query("DELETE FROM role_permissions WHERE school_id = $1", [
+        schoolId,
+      ]);
       await client.query("DELETE FROM roles WHERE school_id = $1", [schoolId]);
-      await client.query("DELETE FROM memberships WHERE school_id = $1", [schoolId]);
+      await client.query("DELETE FROM memberships WHERE school_id = $1", [
+        schoolId,
+      ]);
     });
   }
   await migrationPool.query(
@@ -418,11 +428,27 @@ describe("Phase 1 tenant isolation", () => {
       expect(policy.check_expression).toContain("app.school_id");
     }
 
+    const loginPolicy = await migrationPool.query<{
+      cmd: string;
+      qual: string;
+    }>(`
+      SELECT cmd, qual FROM pg_policies
+      WHERE schemaname = 'public' AND tablename = 'memberships'
+        AND policyname = 'login_membership_read'
+    `);
+    expect(loginPolicy.rows[0]?.cmd).toBe("SELECT");
+    expect(loginPolicy.rows[0]?.qual).toContain("app.login_user_id");
+
     const appRole = await migrationPool.query<{
       rolsuper: boolean;
       rolbypassrls: boolean;
-    }>("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'arrow_app'");
-    expect(appRole.rows[0]).toMatchObject({ rolsuper: false, rolbypassrls: false });
+    }>(
+      "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'arrow_app'",
+    );
+    expect(appRole.rows[0]).toMatchObject({
+      rolsuper: false,
+      rolbypassrls: false,
+    });
   });
 
   it("returns zero rows for every tenant table when app.school_id is unset", async () => {
@@ -566,7 +592,7 @@ describe("Phase 1 tenant isolation", () => {
     expect(denied.status).toBe(403);
     const audit = await inMigrationSchool(fixture.schoolA, (client) =>
       client.query<{ count: string }>(
-      `
+        `
       SELECT count(*) FROM audit_log WHERE school_id = $1 AND action = 'authorization.denied'
     `,
         [fixture.schoolA],
@@ -614,6 +640,64 @@ describe("Phase 1 tenant isolation", () => {
       [tokenHash],
     );
     expect(Number(family.rows[0]!.live_tokens)).toBe(0);
+  });
+
+  it("lets an admin registered through the API log in after school approval", async () => {
+    const slug = `registration-${randomUUID()}`;
+    const email = `admin-${slug}@example.test`;
+    let schoolId: string | undefined;
+
+    try {
+      const registered = await request(app).post("/api/v1/schools").send({
+        name: "Registered School",
+        slug,
+        email,
+        password,
+      });
+      expect(registered.status).toBe(201);
+      schoolId = registered.body.schoolId as string;
+
+      const pendingLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: email,
+        password,
+        schoolSlug: slug,
+      });
+      expect(pendingLogin.status).toBe(403);
+      expect(pendingLogin.body.code).toBe("SCHOOL_UNAVAILABLE");
+
+      await migrationPool.query(
+        "UPDATE schools SET status = 'active' WHERE id = $1",
+        [schoolId],
+      );
+      const login = await request(app).post("/api/v1/auth/login").send({
+        identifier: email,
+        password,
+        schoolSlug: slug,
+      });
+      expect(login.status).toBe(200);
+
+      const me = await request(app)
+        .get("/api/v1/me")
+        .set("Authorization", `Bearer ${login.body.accessToken}`);
+      expect(me.status).toBe(200);
+      expect(me.body.school.id).toBe(schoolId);
+    } finally {
+      if (schoolId) {
+        await inMigrationSchool(schoolId, async (client) => {
+          await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM membership_roles WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM role_permissions WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM roles WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM memberships WHERE school_id = $1", [schoolId]);
+        });
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+          [email],
+        );
+        await migrationPool.query("DELETE FROM users WHERE email = $1", [email]);
+        await migrationPool.query("DELETE FROM schools WHERE id = $1", [schoolId]);
+      }
+    }
   });
 });
 

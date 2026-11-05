@@ -41,10 +41,29 @@ export async function tenantContext(
     return;
   }
 
+  let responseEndArguments: Parameters<Response["end"]> | undefined;
+  let releaseResponseEnd = () => {};
+  const responseEndRequested = new Promise<void>((resolve) => {
+    releaseResponseEnd = resolve;
+  });
+  const originalEnd = response.end;
+  response.end = ((...args: Parameters<Response["end"]>) => {
+    responseEndArguments = args;
+    releaseResponseEnd();
+    return response;
+  }) as Response["end"];
+
   try {
     await db.transaction().execute(async (tx) => {
       const context: TenantContext = { tx, claims, rollback: false };
       request.tenantContext = context;
+      const onClose = () => {
+        if (!response.writableFinished) {
+          context.rollback = true;
+          releaseResponseEnd();
+        }
+      };
+      response.once("close", onClose);
 
       await sql`SELECT
         set_config('app.school_id', ${claims.schoolId}, true),
@@ -66,24 +85,25 @@ export async function tenantContext(
         return;
       }
 
-      const finished = new Promise<void>((resolve) => {
-        response.once("finish", resolve);
-        response.once("close", resolve);
-      });
       next();
-      await finished;
-      if (context.rollback || !response.writableFinished) {
+      await responseEndRequested;
+      if (context.rollback) {
         throw new RollbackRequest();
       }
     });
   } catch (error) {
-    if (error instanceof RollbackRequest) {
-      return;
+    if (!(error instanceof RollbackRequest)) {
+      response.end = originalEnd;
+      next(
+        error instanceof HttpError
+          ? error
+          : new HttpError(500, "INTERNAL_ERROR", "Request failed"),
+      );
     }
-    next(
-      error instanceof HttpError
-        ? error
-        : new HttpError(500, "INTERNAL_ERROR", "Request failed"),
-    );
+  } finally {
+    response.end = originalEnd;
+    if (responseEndArguments) {
+      originalEnd.apply(response, responseEndArguments);
+    }
   }
 }

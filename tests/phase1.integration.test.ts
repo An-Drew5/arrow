@@ -839,6 +839,7 @@ describe("Phase 1 tenant isolation", () => {
             await client.query("DELETE FROM students WHERE id = $1", [studentId]);
           }
           if (classId) {
+            await client.query("DELETE FROM assessments WHERE class_id = $1", [classId]);
             await client.query("DELETE FROM class_subjects WHERE class_id = $1", [classId]);
           }
           if (termId) {

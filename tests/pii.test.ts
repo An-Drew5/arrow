@@ -11,7 +11,9 @@ describe("PII encryption", () => {
   it("rejects values whose authentication tag is changed", () => {
     const encrypted = encryptPii("+233201234567");
     const parts = encrypted.split(":");
-    parts[2] = `${parts[2]!.slice(0, -1)}A`;
+    const tag = Buffer.from(parts[2]!, "base64url");
+    tag[0] = tag[0]! ^ 1;
+    parts[2] = tag.toString("base64url");
     expect(() => decryptPii(parts.join(":"))).toThrow();
   });
 });

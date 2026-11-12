@@ -51,8 +51,11 @@ export async function registerSchool(
     type: argon2.argon2id,
   });
   const school = await sql<{ id: string }>`
-    INSERT INTO schools (name, slug, region)
-    VALUES (${input.name}, ${input.slug}, ${input.region ?? null})
+    INSERT INTO schools (name, slug, region, email, phone)
+    VALUES (
+      ${input.name}, ${input.slug}, ${input.region ?? null},
+      ${input.email ?? null}, ${input.phone ?? null}
+    )
     RETURNING id
   `.execute(tx);
   const schoolId = school.rows[0]!.id;

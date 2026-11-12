@@ -63,6 +63,15 @@ const tenantTables = [
   "term_results",
   "attendance",
   "import_jobs",
+  "school_settings",
+  "student_subject_opt_outs",
+  "scheme_components",
+  "grading_scales",
+  "term_summaries",
+  "attendance_registers",
+  "school_closures",
+  "term_attendance",
+  "attendance_versions",
 ] as const;
 type TenantTable = (typeof tenantTables)[number];
 type ProbeTable = (typeof probeTables)[number];

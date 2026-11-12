@@ -419,11 +419,14 @@ describe("Phase 1 tenant isolation", () => {
       "academic_years",
       "assessments",
       "attendance",
+      "attendance_registers",
+      "attendance_versions",
       "audit_log",
       "class_subjects",
       "classes",
       "enrollments",
       "grade_bands",
+      "grading_scales",
       "grading_scheme_overrides",
       "grading_schemes",
       "guardians",
@@ -435,11 +438,17 @@ describe("Phase 1 tenant isolation", () => {
       "roles",
       "score_versions",
       "scores",
+      "scheme_components",
+      "school_closures",
+      "school_settings",
       "students",
+      "student_subject_opt_outs",
       "schools",
       "subjects",
       "teacher_assignments",
       "term_results",
+      "term_attendance",
+      "term_summaries",
       "terms",
       "users",
     ].sort();
@@ -721,8 +730,8 @@ describe("Phase 1 tenant isolation", () => {
         `, [schoolId]),
       );
       expect(schemes.rows).toEqual([
-        { name: "JHS nine-point", band_count: 9 },
-        { name: "Primary A-F", band_count: 7 },
+        { name: "JHS scheme", band_count: 14 },
+        { name: "Primary scheme", band_count: 19 },
       ]);
 
       const pendingLogin = await request(app).post("/api/v1/auth/login").send({

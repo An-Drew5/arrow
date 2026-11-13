@@ -52,6 +52,27 @@ teacherRoutes.post(
     if ((type === "subject") !== (parsed.data.subjectId != null)) {
       throw new HttpError(400, "VALIDATION_ERROR", "Subject assignments require a subject; class assignments do not");
     }
+    if (type === "all_subjects") {
+      const teacherRoles = await sql<{ has_class_teacher: boolean; has_subject_teacher: boolean }>`
+        SELECT
+          coalesce(bool_or(r.name = 'class_teacher'), false) AS has_class_teacher,
+          coalesce(bool_or(r.name = 'subject_teacher'), false) AS has_subject_teacher
+        FROM membership_roles mr
+        JOIN roles r ON r.school_id = mr.school_id AND r.id = mr.role_id
+        WHERE mr.school_id = ${claims.schoolId!}::uuid
+          AND mr.membership_id = ${parsed.data.membershipId}::uuid
+      `.execute(tx);
+      if (
+        !teacherRoles.rows[0]?.has_class_teacher ||
+        !teacherRoles.rows[0]?.has_subject_teacher
+      ) {
+        throw new HttpError(
+          400,
+          "ALL_SUBJECTS_REQUIRES_TEACHER_ROLES",
+          "All-subject assignments require both class_teacher and subject_teacher roles",
+        );
+      }
+    }
 
     const assignment = await sql<{ id: string }>`
       INSERT INTO teacher_assignments (

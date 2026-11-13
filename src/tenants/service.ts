@@ -1,5 +1,6 @@
 import argon2 from "argon2";
 import { sql, type Transaction } from "kysely";
+import { seedDefaultGradingSchemes } from "../academics/seeds";
 import { recordAudit } from "../audit/service";
 import type { Database } from "../shared/db/database";
 import { defaultRolePermissions } from "../shared/rbac/permissions";
@@ -50,8 +51,11 @@ export async function registerSchool(
     type: argon2.argon2id,
   });
   const school = await sql<{ id: string }>`
-    INSERT INTO schools (name, slug, region)
-    VALUES (${input.name}, ${input.slug}, ${input.region ?? null})
+    INSERT INTO schools (name, slug, region, email, phone)
+    VALUES (
+      ${input.name}, ${input.slug}, ${input.region ?? null},
+      ${input.email ?? null}, ${input.phone ?? null}
+    )
     RETURNING id
   `.execute(tx);
   const schoolId = school.rows[0]!.id;
@@ -67,6 +71,8 @@ export async function registerSchool(
     set_config('app.school_id', ${schoolId}, true),
     set_config('app.user_id', ${userId}, true)
   `.execute(tx);
+
+  await seedDefaultGradingSchemes(tx, schoolId);
 
   const membership = await sql<{ id: string }>`
     INSERT INTO memberships (school_id, user_id)

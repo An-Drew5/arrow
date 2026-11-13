@@ -1,6 +1,7 @@
 import { Router, type Request } from "express";
 import { sql } from "kysely";
 import { z } from "zod";
+import { seedDefaultGradingSchemes } from "../academics/seeds";
 import { recordAudit } from "../audit/service";
 import { verifyAccessToken, type AccessClaims } from "../auth/token";
 import { db } from "../shared/db/database";
@@ -107,6 +108,7 @@ async function updateSchoolStatus(
       set_config('app.school_id', ${updated.id}, true),
       set_config('app.user_id', ${claims.userId}, true)
     `.execute(tx);
+    await seedDefaultGradingSchemes(tx, updated.id);
     await recordAudit(tx, {
       schoolId: updated.id,
       userId: claims.userId,

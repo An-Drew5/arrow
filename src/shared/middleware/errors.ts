@@ -66,6 +66,11 @@ export const errorHandler: ErrorRequestHandler = (
     return;
   }
 
+  console.error("Unhandled request error", {
+    method: request.method,
+    path: request.path,
+    error,
+  });
   response
     .status(500)
     .json({ code: "INTERNAL_ERROR", message: "Request failed" });

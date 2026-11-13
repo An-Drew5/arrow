@@ -41,9 +41,12 @@ The configured email in `PLATFORM_ADMIN_EMAIL` is the platform identity. The see
 - `POST /api/v1/auth/logout` revokes the refresh-token family and clears the cookie.
 - `GET /api/v1/me` returns the authenticated user, school, roles, and permissions.
 - `POST /api/v1/users` creates a school staff membership and requires `users:manage`.
+- `GET /api/v1/roles` lists the school roles and their permissions and requires `users:read`.
+- `GET /api/v1/classes/:id/assessments` lists open-term assessments visible within the caller's active class/subject assignment.
 - `GET /api/v1/audit-log?page=1&limit=50` returns a school-scoped page and requires `audit:read`.
 - `POST /api/v1/platform/schools/:id/approve` and `/suspend` require the configured platform administrator and are audited.
 - `GET /api/v1/health` checks PostgreSQL and Redis.
+- An `all_subjects` teacher assignment requires the assigned membership to have both the `class_teacher` and `subject_teacher` roles.
 
 Authenticated school routes derive the school only from the verified access token. Each request uses one transaction with transaction-local `app.school_id` and `app.user_id` settings. Tenant tables have forced RLS; the app role does not own those tables and does not have `BYPASSRLS`. Audit rows are append-only for the app role.
 

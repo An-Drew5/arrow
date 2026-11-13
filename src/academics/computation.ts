@@ -221,23 +221,72 @@ export function summarizePupil(input: {
   aggregateSubjectCount: number;
   positionBasis: "best_n" | "all_subjects";
   passMark: number;
+  level?: number;
+  subjects?: readonly {
+    subjectId: string;
+    subjectName: string;
+    isCore: boolean;
+    total: number | null;
+  }[];
 }): {
   totalRaw: number;
   outOf: number;
   average: number | null;
   aggregate: number | null;
   positionScore: number | null;
+  aggregateSubjects: Array<{ subjectId: string; subjectName: string; total: number }>;
   subjectsPassed: number;
   subjectsFailed: number;
   unrankable: boolean;
 } {
   const { totals } = input;
-  const required = Math.min(input.aggregateSubjectCount, input.subjectsTaken);
-  const sorted = [...totals].sort((a, b) => b - a);
-  const rankable = required > 0 && totals.length >= required;
-  const aggregate = rankable
-    ? sorted.slice(0, required).reduce((sum, total) => sum + total, 0)
-    : null;
+  const isJhs = input.level !== undefined && input.level >= 7;
+  let aggregate: number | null;
+  let rankable: boolean;
+  let aggregateSubjects: Array<{ subjectId: string; subjectName: string; total: number }>;
+  type SubjectWithTotal = {
+    subjectId: string;
+    subjectName: string;
+    isCore: boolean;
+    total: number;
+  };
+  if (isJhs) {
+    const subjects = input.subjects ?? [];
+    const coreSubjects = subjects.filter((subject) => subject.isCore);
+    const completeCoreSubjects = coreSubjects.filter(
+      (subject): subject is SubjectWithTotal => subject.total !== null,
+    );
+    const otherSubjects = subjects
+      .filter(
+        (subject): subject is SubjectWithTotal =>
+          !subject.isCore && subject.total !== null,
+      )
+      .sort((a, b) => b.total - a.total);
+    const otherSubjectCount = Math.max(0, input.aggregateSubjectCount - coreSubjects.length);
+    aggregateSubjects = [
+      ...completeCoreSubjects,
+      ...otherSubjects.slice(0, otherSubjectCount),
+    ].map(({ subjectId, subjectName, total }) => ({ subjectId, subjectName, total }));
+    rankable = coreSubjects.length === completeCoreSubjects.length
+      && aggregateSubjects.length > 0;
+    if (!rankable) aggregateSubjects = [];
+    aggregate = rankable
+      ? aggregateSubjects.reduce((sum, subject) => sum + subject.total, 0)
+      : null;
+  } else {
+    const required = Math.min(input.aggregateSubjectCount, input.subjectsTaken);
+    const sorted = [...totals].sort((a, b) => b - a);
+    rankable = required > 0 && totals.length >= required;
+    aggregate = rankable
+      ? sorted.slice(0, required).reduce((sum, total) => sum + total, 0)
+      : null;
+    aggregateSubjects = [...(input.subjects ?? [])]
+      .filter((subject): subject is SubjectWithTotal => subject.total !== null)
+      .sort((a, b) => b.total - a.total)
+      .slice(0, required)
+      .map(({ subjectId, subjectName, total }) => ({ subjectId, subjectName, total }));
+    if (!rankable) aggregateSubjects = [];
+  }
   return {
     totalRaw: totals.reduce((sum, total) => sum + total, 0),
     outOf: totals.length * 100,
@@ -245,9 +294,12 @@ export function summarizePupil(input: {
     aggregate,
     positionScore: !rankable
       ? null
+      : isJhs
+      ? aggregate
       : input.positionBasis === "all_subjects"
       ? totals.length > 0 ? totals.reduce((sum, total) => sum + total, 0) : null
       : aggregate,
+    aggregateSubjects,
     subjectsPassed: totals.filter((total) => total >= input.passMark).length,
     subjectsFailed: totals.filter((total) => total < input.passMark).length,
     unrankable: !rankable,

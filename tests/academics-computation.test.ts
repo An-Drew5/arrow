@@ -207,6 +207,87 @@ describe("academic result computation", () => {
       .toEqual(["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "101st", "111th", "112th"]);
   });
 
+  it("uses the JHS core-subject rule and leaves Primary aggregates unchanged", () => {
+    const subjects = [
+      { subjectId: "english", subjectName: "English", isCore: true, total: 60 },
+      { subjectId: "maths", subjectName: "Mathematics", isCore: true, total: 65 },
+      { subjectId: "science", subjectName: "Integrated Science", isCore: true, total: 70 },
+      { subjectId: "social", subjectName: "Social Studies", isCore: true, total: 50 },
+      { subjectId: "french", subjectName: "French", isCore: false, total: 100 },
+      { subjectId: "art", subjectName: "Art", isCore: false, total: 95 },
+      { subjectId: "ict", subjectName: "ICT", isCore: false, total: 90 },
+    ] as const;
+    const jhs = summarizePupil({
+      totals: subjects.map(({ total }) => total),
+      subjectsTaken: subjects.length,
+      aggregateSubjectCount: 6,
+      positionBasis: "all_subjects",
+      passMark: 40,
+      level: 7,
+      subjects,
+    });
+    expect(jhs).toMatchObject({
+      aggregate: 440,
+      positionScore: 440,
+      aggregateSubjects: [
+        { subjectId: "english", total: 60 },
+        { subjectId: "maths", total: 65 },
+        { subjectId: "science", total: 70 },
+        { subjectId: "social", total: 50 },
+        { subjectId: "french", total: 100 },
+        { subjectId: "art", total: 95 },
+      ],
+    });
+    expect(jhs.aggregate).not.toBe(480);
+
+    const missingCore = summarizePupil({
+      totals: [60, 65, 70, 100, 95, 90],
+      subjectsTaken: 7,
+      aggregateSubjectCount: 6,
+      positionBasis: "best_n",
+      passMark: 40,
+      level: 7,
+      subjects: subjects.map((subject) => ({
+        ...subject,
+        total: subject.subjectId === "social" ? null : subject.total,
+      })),
+    });
+    expect(missingCore).toMatchObject({
+      aggregate: null,
+      positionScore: null,
+      aggregateSubjects: [],
+      unrankable: true,
+    });
+
+    const fewerOtherSubjects = summarizePupil({
+      totals: [60, 65, 70, 50, 100],
+      subjectsTaken: 5,
+      aggregateSubjectCount: 6,
+      positionBasis: "best_n",
+      passMark: 40,
+      level: 7,
+      subjects: subjects.slice(0, 5),
+    });
+    expect(fewerOtherSubjects).toMatchObject({
+      aggregate: 345,
+      aggregateSubjects: expect.arrayContaining([
+        expect.objectContaining({ subjectId: "french", total: 100 }),
+      ]),
+    });
+
+    const primary = summarizePupil({
+      totals: subjects.map(({ total }) => total),
+      subjectsTaken: subjects.length,
+      aggregateSubjectCount: 6,
+      positionBasis: "all_subjects",
+      passMark: 40,
+      level: 6,
+      subjects,
+    });
+    expect(primary.aggregate).toBe(480);
+    expect(primary.positionScore).toBe(530);
+  });
+
   it("rejects fractional marks beyond one decimal place and invalid weights", () => {
     expect(calculateResult({
       components: [{ kind: "sba", name: "SBA", maxMark: "15.00", score: { mark: "12.00", status: "scored" } }],

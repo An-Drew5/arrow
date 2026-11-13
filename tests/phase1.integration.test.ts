@@ -709,12 +709,16 @@ describe("Phase 1 tenant isolation", () => {
     let schoolId: string | undefined;
     let academicYearId: string | undefined;
     let termId: string | undefined;
+    let jhsTermId: string | undefined;
     let classId: string | undefined;
+    let jhsClassId: string | undefined;
     let subjectId: string | undefined;
     let mathsSubjectId: string | undefined;
     let scienceSubjectId: string | undefined;
     let studentId: string | undefined;
+    let jhsStudentId: string | undefined;
     const additionalStudentIds: string[] = [];
+    const jhsSubjectIds: string[] = [];
     let teacherUserId: string | undefined;
     let platformAdminUserId: string | undefined;
     let previousPlatformAdmin: { password_hash: string; status: string } | undefined;
@@ -856,6 +860,7 @@ describe("Phase 1 tenant isolation", () => {
         .set(authorization)
         .send({ name: "English", code: `E-${slug.slice(-8)}` });
       expect(subject.status).toBe(201);
+      expect(subject.body.isCore).toBe(true);
       subjectId = subject.body.id as string;
 
       const classSubject = await request(app)
@@ -1151,6 +1156,170 @@ describe("Phase 1 tenant isolation", () => {
         overallPosition: null,
       });
 
+      const jhsTerm = await request(app)
+        .post(`/api/v1/academic-years/${academicYearId}/terms`)
+        .set(authorization)
+        .send({ name: "Term 2", termNumber: 2, startDate: "2026-01-05", endDate: "2026-04-10" });
+      expect(jhsTerm.status).toBe(201);
+      jhsTermId = jhsTerm.body.id as string;
+      const jhsClass = await request(app)
+        .post("/api/v1/classes")
+        .set(authorization)
+        .send({ academicYearId, name: "Basic 7 A", level: 7, stream: "A" });
+      expect(jhsClass.status).toBe(201);
+      jhsClassId = jhsClass.body.id as string;
+      const jhsPupil = await request(app)
+        .post("/api/v1/students")
+        .set(authorization)
+        .send({
+          admissionNo: `JHS-${slug.slice(-8)}`,
+          firstName: "Esi",
+          lastName: "JHS",
+          dateOfBirth: "2013-03-14",
+          gender: "female",
+        });
+      expect(jhsPupil.status).toBe(201);
+      jhsStudentId = jhsPupil.body.id as string;
+      const jhsEnrollment = await request(app)
+        .post(`/api/v1/students/${jhsStudentId}/enrollments`)
+        .set(authorization)
+        .send({ academicYearId, classId: jhsClassId });
+      expect(jhsEnrollment.status).toBe(201);
+
+      const jhsSubjectNames = [
+        "English",
+        "Mathematics",
+        "Integrated Science",
+        "Social Studies",
+        "French",
+        "Art",
+        "ICT",
+      ];
+      const jhsSubjects: Array<{ id: string; name: string; isCore: boolean }> = [];
+      for (const [index, name] of jhsSubjectNames.entries()) {
+        let id: string;
+        if (name === "English") {
+          id = subjectId!;
+        } else {
+          const createdSubject = await request(app)
+            .post("/api/v1/subjects")
+            .set(authorization)
+            .send({ name, code: `J${index}-${slug.slice(-8)}` });
+          expect(createdSubject.status).toBe(201);
+          expect(createdSubject.body.isCore).toBe(index < 4);
+          id = createdSubject.body.id as string;
+          jhsSubjectIds.push(id);
+        }
+        jhsSubjects.push({ id, name, isCore: index < 4 });
+        const assignedSubject = await request(app)
+          .post(`/api/v1/classes/${jhsClassId}/subjects`)
+          .set(authorization)
+          .send({ subjectId: id });
+        expect(assignedSubject.status).toBe(201);
+      }
+      const changedCoreFlag = await request(app)
+        .patch(`/api/v1/subjects/${jhsSubjects[0]!.id}`)
+        .set(authorization)
+        .send({ isCore: false });
+      expect(changedCoreFlag.status).toBe(200);
+      expect(changedCoreFlag.body.isCore).toBe(false);
+      const restoredCoreFlag = await request(app)
+        .patch(`/api/v1/subjects/${jhsSubjects[0]!.id}`)
+        .set(authorization)
+        .send({ isCore: true });
+      expect(restoredCoreFlag.status).toBe(200);
+
+      const jhsAssessments = await request(app)
+        .get(`/api/v1/classes/${jhsClassId}/assessments`)
+        .set(authorization);
+      expect(jhsAssessments.status).toBe(200);
+      const examPercentBySubject: Record<string, number> = {
+        English: 20,
+        Mathematics: 30,
+        "Integrated Science": 40,
+        "Social Studies": 0,
+        French: 100,
+        Art: 90,
+        ICT: 80,
+      };
+      for (const assessment of jhsAssessments.body.items as Array<{
+        id: string;
+        subjectName: string;
+        component: string | null;
+        maxMark: string;
+      }>) {
+        const maxMark = Number(assessment.maxMark);
+        const mark = assessment.component === "exam"
+          ? Math.round(maxMark * examPercentBySubject[assessment.subjectName]! * 10 / 100) / 10
+          : maxMark;
+        const saved = await request(app)
+          .put(`/api/v1/assessments/${assessment.id}/scores`)
+          .set(authorization)
+          .send({
+            items: [{
+              clientId: randomUUID(),
+              studentId: jhsStudentId,
+              mark,
+              status: "scored",
+            }],
+          });
+        expect(saved.status).toBe(200);
+      }
+      const jhsComputed = await request(app)
+        .post(`/api/v1/terms/${jhsTermId}/compute-results`)
+        .set(authorization)
+        .send({});
+      expect(jhsComputed.status).toBe(200);
+      const jhsResults = await request(app)
+        .get(`/api/v1/results?classId=${jhsClassId}&termId=${jhsTermId}`)
+        .set(authorization);
+      expect(jhsResults.status).toBe(200);
+      const jhsResultRows = jhsResults.body.items as Array<{
+        subjectId: string;
+        total: number | string | null;
+      }>;
+      const totalsBySubject = new Map(
+        jhsResultRows.map((row) => [row.subjectId, row.total === null ? null : Number(row.total)]),
+      );
+      const selectedSubjects = [
+        ...jhsSubjects.filter((subject) => subject.isCore),
+        ...jhsSubjects
+          .filter((subject) => !subject.isCore)
+          .sort((a, b) => (totalsBySubject.get(b.id) ?? -1) - (totalsBySubject.get(a.id) ?? -1))
+          .slice(0, 2),
+      ];
+      const expectedAggregate = selectedSubjects.reduce(
+        (sum, subject) => sum + (totalsBySubject.get(subject.id) ?? 0),
+        0,
+      );
+      const jhsReportCards = await request(app)
+        .get(`/api/v1/terms/${jhsTermId}/report-cards?classId=${jhsClassId}`)
+        .set(authorization);
+      expect(jhsReportCards.status).toBe(200);
+      const jhsReportCard = (jhsReportCards.body.items as Array<{
+        studentName: string;
+        aggregate: number;
+        aggregateSubjects: Array<{ subjectId: string }>;
+        subjects: Array<{ subjectId: string; countedTowardAggregate: boolean }>;
+      }>).find((item) => item.studentName === "Esi JHS");
+      expect(jhsReportCard).toBeDefined();
+      expect(jhsReportCard?.aggregate).toBe(expectedAggregate);
+      expect(jhsReportCard?.aggregateSubjects.map((subject) => subject.subjectId).sort())
+        .toEqual(selectedSubjects.map((subject) => subject.id).sort());
+      expect(jhsReportCard?.subjects.filter((subject) => subject.countedTowardAggregate))
+        .toHaveLength(6);
+
+      const jhsBroadsheet = await request(app)
+        .get(`/api/v1/classes/${jhsClassId}/broadsheet?termId=${jhsTermId}`)
+        .set(authorization);
+      expect(jhsBroadsheet.status).toBe(200);
+      expect(jhsBroadsheet.body.items[0].aggregateSubjects.map(
+        (subject: { subjectId: string }) => subject.subjectId,
+      ).sort()).toEqual(selectedSubjects.map((subject) => subject.id).sort());
+      expect(jhsBroadsheet.body.items[0].subjects.filter(
+        (subject: { countedTowardAggregate: boolean }) => subject.countedTowardAggregate,
+      )).toHaveLength(6);
+
       const locked = await request(app)
         .post(`/api/v1/terms/${termId}/lock`)
         .set(authorization)
@@ -1175,28 +1344,30 @@ describe("Phase 1 tenant isolation", () => {
     } finally {
       if (schoolId) {
         await inMigrationSchool(schoolId, async (client) => {
+          const allClassIds = [classId, jhsClassId].filter((id): id is string => id !== undefined);
+          const allTermIds = [termId, jhsTermId].filter((id): id is string => id !== undefined);
           await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
           await client.query(
             `DELETE FROM score_versions WHERE score_id IN (
               SELECT id FROM scores WHERE assessment_id IN (
-                SELECT id FROM assessments WHERE class_id = $1
+                SELECT id FROM assessments WHERE class_id = ANY($1::uuid[])
               )
             )`,
-            [classId],
+            [allClassIds],
           );
           await client.query(
             `DELETE FROM scores WHERE assessment_id IN (
-              SELECT id FROM assessments WHERE class_id = $1
+              SELECT id FROM assessments WHERE class_id = ANY($1::uuid[])
             )`,
-            [classId],
+            [allClassIds],
           );
-          if (termId) {
-            await client.query("DELETE FROM term_summaries WHERE term_id = $1", [termId]);
-            await client.query("DELETE FROM term_results WHERE term_id = $1", [termId]);
-            await client.query("DELETE FROM term_attendance WHERE term_id = $1", [termId]);
+          if (allTermIds.length > 0) {
+            await client.query("DELETE FROM term_summaries WHERE term_id = ANY($1::uuid[])", [allTermIds]);
+            await client.query("DELETE FROM term_results WHERE term_id = ANY($1::uuid[])", [allTermIds]);
+            await client.query("DELETE FROM term_attendance WHERE term_id = ANY($1::uuid[])", [allTermIds]);
           }
-          if (classId) {
-            await client.query("DELETE FROM teacher_assignments WHERE class_id = $1", [classId]);
+          if (allClassIds.length > 0) {
+            await client.query("DELETE FROM teacher_assignments WHERE class_id = ANY($1::uuid[])", [allClassIds]);
           }
           if (studentId) {
             await client.query("DELETE FROM guardians WHERE student_id = $1", [studentId]);
@@ -1207,22 +1378,22 @@ describe("Phase 1 tenant isolation", () => {
               [additionalStudentIds],
             );
           }
-          const allStudentIds = [studentId, ...additionalStudentIds].filter(
+          const allStudentIds = [studentId, jhsStudentId, ...additionalStudentIds].filter(
             (id): id is string => id !== undefined,
           );
           await client.query("DELETE FROM enrollments WHERE student_id = ANY($1::uuid[])", [allStudentIds]);
           await client.query("DELETE FROM students WHERE id = ANY($1::uuid[])", [allStudentIds]);
-          if (classId) {
-            await client.query("DELETE FROM assessments WHERE class_id = $1", [classId]);
-            await client.query("DELETE FROM class_subjects WHERE class_id = $1", [classId]);
+          if (allClassIds.length > 0) {
+            await client.query("DELETE FROM assessments WHERE class_id = ANY($1::uuid[])", [allClassIds]);
+            await client.query("DELETE FROM class_subjects WHERE class_id = ANY($1::uuid[])", [allClassIds]);
           }
-          if (termId) {
-            await client.query("DELETE FROM terms WHERE id = $1", [termId]);
+          if (allTermIds.length > 0) {
+            await client.query("DELETE FROM terms WHERE id = ANY($1::uuid[])", [allTermIds]);
           }
-          if (classId) {
-            await client.query("DELETE FROM classes WHERE id = $1", [classId]);
+          if (allClassIds.length > 0) {
+            await client.query("DELETE FROM classes WHERE id = ANY($1::uuid[])", [allClassIds]);
           }
-          const allSubjectIds = [subjectId, mathsSubjectId, scienceSubjectId].filter(
+          const allSubjectIds = [subjectId, mathsSubjectId, scienceSubjectId, ...jhsSubjectIds].filter(
             (id): id is string => id !== undefined,
           );
           await client.query("DELETE FROM subjects WHERE id = ANY($1::uuid[])", [allSubjectIds]);

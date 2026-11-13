@@ -38,7 +38,12 @@ const classSchema = z.object({
 const subjectSchema = z.object({
   name: z.string().trim().min(1).max(100),
   code: z.string().trim().min(1).max(20).toUpperCase(),
+  isCore: z.boolean().optional(),
 }).strict();
+const subjectUpdateSchema = subjectSchema.partial().strict().refine(
+  (value) => Object.keys(value).length > 0,
+  { message: "At least one field must be provided" },
+);
 const studentSchema = z.object({
   admissionNo: z.string().trim().min(1).max(40).optional(),
   firstName: z.string().trim().min(1).max(100),
@@ -153,6 +158,16 @@ function parseId(value: string | undefined): string {
     throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", parsed.error.issues);
   }
   return parsed.data;
+}
+
+function isCoreSubjectName(name: string): boolean {
+  return [
+    "english",
+    "mathematics",
+    "integrated science",
+    "science",
+    "social studies",
+  ].includes(name.trim().toLowerCase());
 }
 
 function actor(request: RequestWithTenant) {
@@ -302,19 +317,57 @@ academicsRoutes.post("/subjects", ...route("academics:manage", async (request, r
   const input = parseBody(subjectSchema, request.body);
   const { tx } = context(request);
   const { schoolId, userId } = actor(request);
+  const isCore = input.isCore ?? isCoreSubjectName(input.name);
   const result = await sql<{ id: string }>`
-    INSERT INTO subjects (school_id, name, code) VALUES (${schoolId}::uuid, ${input.name}, ${input.code})
+    INSERT INTO subjects (school_id, name, code, is_core)
+    VALUES (${schoolId}::uuid, ${input.name}, ${input.code}, ${isCore})
     RETURNING id
   `.execute(tx);
   const id = result.rows[0]!.id;
   await recordAudit(tx, { schoolId, userId, action: "subject.created", resourceType: "subject", resourceId: id });
-  response.status(201).json({ id, ...input });
+  response.status(201).json({ id, name: input.name, code: input.code, isCore });
 }));
 
 academicsRoutes.get("/subjects", ...route("students:read", async (request, response) => {
   const { tx } = context(request);
-  const rows = await sql`SELECT id, name, code FROM subjects ORDER BY name`.execute(tx);
+  const rows = await sql`SELECT id, name, code, is_core AS "isCore" FROM subjects ORDER BY name`.execute(tx);
   response.json({ items: rows.rows });
+}));
+
+academicsRoutes.patch("/subjects/:id", ...route("academics:manage", async (request, response) => {
+  const id = parseId(request.params.id);
+  const input = parseBody(subjectUpdateSchema, request.body);
+  const { tx } = context(request);
+  const { schoolId, userId } = actor(request);
+  const updated = await sql<{
+    id: string;
+    name: string;
+    code: string;
+    is_core: boolean;
+  }>`
+    UPDATE subjects
+    SET name = COALESCE(${input.name ?? null}, name),
+        code = COALESCE(${input.code ?? null}, code),
+        is_core = COALESCE(${input.isCore ?? null}, is_core)
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+    RETURNING id, name, code, is_core
+  `.execute(tx);
+  const subject = updated.rows[0];
+  if (!subject) throw new HttpError(404, "NOT_FOUND", "Subject not found");
+  await recordAudit(tx, {
+    schoolId,
+    userId,
+    action: "subject.updated",
+    resourceType: "subject",
+    resourceId: id,
+    metadata: input,
+  });
+  response.json({
+    id: subject.id,
+    name: subject.name,
+    code: subject.code,
+    isCore: subject.is_core,
+  });
 }));
 
 academicsRoutes.get("/classes/:id/subjects", ...route("students:read", async (request, response) => {
@@ -323,7 +376,8 @@ academicsRoutes.get("/classes/:id/subjects", ...route("students:read", async (re
   const classroom = await sql`SELECT id FROM classes WHERE id = ${classId}::uuid`.execute(tx);
   if (!classroom.rows[0]) throw new HttpError(404, "NOT_FOUND", "Class not found");
   const rows = await sql`
-    SELECT cs.id, s.id AS "subjectId", s.name, s.code
+    SELECT cs.id, s.id AS "subjectId", s.name, s.code,
+      s.is_core AS "isCore"
     FROM class_subjects cs JOIN subjects s
       ON s.school_id = cs.school_id AND s.id = cs.subject_id
     WHERE cs.class_id = ${classId}::uuid ORDER BY s.name

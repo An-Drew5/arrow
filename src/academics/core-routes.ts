@@ -544,12 +544,14 @@ academicCoreRoutes.get(
       overall_comment: string | null;
       days_present: number | null;
       days_open: number | null;
+      aggregate_subjects: Array<{ subjectId: string; subjectName: string; total: number }> | null;
     }>`
       SELECT ts.student_id, ts.class_id, c.name AS class_name, c.level,
         concat_ws(' ', st.first_name, st.other_names, st.last_name) AS student_name,
         e.roll_number, ts.results_complete, ts.total_raw, ts.out_of, ts.average,
         ts.aggregate, ts.overall_position, ts.subjects_passed, ts.subjects_failed,
-        ts.class_enrolment, ts.overall_comment, ta.days_present, ta.days_open
+        ts.class_enrolment, ts.overall_comment, ta.days_present, ta.days_open,
+        ts.scheme_snapshot -> 'aggregateSubjects' AS aggregate_subjects
       FROM term_summaries ts
       JOIN students st ON st.school_id = ts.school_id AND st.id = ts.student_id
       JOIN classes c ON c.school_id = ts.school_id AND c.id = ts.class_id
@@ -571,6 +573,7 @@ academicCoreRoutes.get(
     const items = [];
     for (const summary of summaries.rows) {
       const subjects = await sql<{
+        id: string;
         name: string;
         sba_scaled: number | null;
         exam_scaled: number | null;
@@ -578,7 +581,7 @@ academicCoreRoutes.get(
         subject_position: number | null;
         grades: Record<string, string>;
       }>`
-        SELECT s.name, r.sba_scaled, r.exam_scaled, r.total, r.subject_position, r.grades
+        SELECT s.id, s.name, r.sba_scaled, r.exam_scaled, r.total, r.subject_position, r.grades
         FROM term_results r
         JOIN subjects s ON s.school_id = r.school_id AND s.id = r.subject_id
         WHERE r.school_id = ${currentActor.schoolId}::uuid
@@ -600,12 +603,17 @@ academicCoreRoutes.get(
         className: summary.class_name,
         rollNumber: summary.roll_number,
         studentName: summary.student_name,
+        aggregateSubjects: summary.aggregate_subjects ?? [],
         subjects: subjects.rows.map((subject) => ({
+          subjectId: subject.id,
           name: subject.name,
           sbaScaled: subject.sba_scaled,
           examScaled: subject.exam_scaled,
           total: subject.total,
           position: ordinalLabel(subject.subject_position),
+          countedTowardAggregate: (summary.aggregate_subjects ?? []).some(
+            (aggregateSubject) => aggregateSubject.subjectId === subject.id,
+          ),
           grades: Object.fromEntries(
             Object.entries(subject.grades).filter(([kind]) => scaleKinds.includes(kind)),
           ),
@@ -671,10 +679,12 @@ academicCoreRoutes.get(
       total: number | null;
       aggregate: number | null;
       overall_position: number | null;
+      aggregate_subjects: Array<{ subjectId: string; subjectName: string; total: number }> | null;
     }>`
       SELECT e.student_id, e.roll_number,
         concat_ws(' ', st.first_name, st.other_names, st.last_name) AS name,
-        ts.total_raw AS total, ts.aggregate, ts.overall_position
+        ts.total_raw AS total, ts.aggregate, ts.overall_position,
+        ts.scheme_snapshot -> 'aggregateSubjects' AS aggregate_subjects
       FROM enrollments e
       JOIN students st ON st.school_id = e.school_id AND st.id = e.student_id
       LEFT JOIN term_summaries ts
@@ -700,9 +710,14 @@ academicCoreRoutes.get(
       rows.push({
         rollNumber: pupil.roll_number,
         name: pupil.name,
+        aggregateSubjects: pupil.aggregate_subjects ?? [],
         subjects: subjects.rows.map((subject) => ({
+          subjectId: subject.id,
           name: subject.name,
           total: totals.rows.find((row) => row.subject_id === subject.id)?.total ?? null,
+          countedTowardAggregate: (pupil.aggregate_subjects ?? []).some(
+            (aggregateSubject) => aggregateSubject.subjectId === subject.id,
+          ),
         })),
         total: pupil.total,
         aggregate: pupil.aggregate,

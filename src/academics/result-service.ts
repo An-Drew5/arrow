@@ -34,6 +34,7 @@ interface ClassSubjectRow {
   level: number;
   subject_id: string;
   subject_name: string;
+  is_core: boolean;
 }
 
 interface EnrolleeRow {
@@ -85,7 +86,7 @@ export async function computeTermResults(
 
   const classSubjects = await sql<ClassSubjectRow>`
     SELECT c.id AS class_id, c.name AS class_name, c.level,
-      cs.subject_id, s.name AS subject_name
+      cs.subject_id, s.name AS subject_name, s.is_core
     FROM classes c
     JOIN class_subjects cs ON cs.school_id = c.school_id AND cs.class_id = c.id
     JOIN subjects s ON s.school_id = cs.school_id AND s.id = cs.subject_id
@@ -95,10 +96,23 @@ export async function computeTermResults(
   `.execute(tx);
 
   const totalsByPupil = new Map<string, number[]>();
+  const subjectResultsByPupil = new Map<string, Array<{
+    subjectId: string;
+    subjectName: string;
+    isCore: boolean;
+    total: number | null;
+  }>>();
   const subjectsTakenByPupil = new Map<string, number>();
   const pupilClassById = new Map<string, string>();
   const summarySnapshotByClass = new Map<string, Record<string, unknown>>();
   let resultsComputed = 0;
+
+  const activePupils = await sql<{ student_id: string; class_id: string }>`
+    SELECT student_id, class_id FROM enrollments
+    WHERE school_id = ${schoolId}::uuid
+      AND academic_year_id = ${term.academic_year_id}::uuid
+      AND status = 'active'
+  `.execute(tx);
 
   await sql`
     DELETE FROM term_results r
@@ -128,6 +142,18 @@ export async function computeTermResults(
   `.execute(tx);
 
   for (const classSubject of classSubjects.rows) {
+    for (const pupil of activePupils.rows) {
+      if (pupil.class_id !== classSubject.class_id) continue;
+      const subjectResults = subjectResultsByPupil.get(pupil.student_id) ?? [];
+      subjectResults.push({
+        subjectId: classSubject.subject_id,
+        subjectName: classSubject.subject_name,
+        isCore: classSubject.is_core,
+        total: null,
+      });
+      subjectResultsByPupil.set(pupil.student_id, subjectResults);
+    }
+
     const schemeResult = await sql<{
       id: string;
       name: string;
@@ -374,6 +400,10 @@ export async function computeTermResults(
       `.execute(tx);
       if (calculated.status === "complete" && calculated.total !== null) {
         totalsByPupil.get(enrollee.student_id)!.push(calculated.total);
+        const subjectResult = subjectResultsByPupil.get(enrollee.student_id)?.find(
+          (subject) => subject.subjectId === classSubject.subject_id,
+        );
+        if (subjectResult) subjectResult.total = calculated.total;
       }
       resultsComputed += 1;
     }
@@ -407,12 +437,6 @@ export async function computeTermResults(
     list.push(studentId);
     pupilsByClass.set(classId, list);
   }
-  const activePupils = await sql<{ student_id: string; class_id: string }>`
-    SELECT student_id, class_id FROM enrollments
-    WHERE school_id = ${schoolId}::uuid
-      AND academic_year_id = ${term.academic_year_id}::uuid
-      AND status = 'active'
-  `.execute(tx);
   for (const pupil of activePupils.rows) {
     pupilClassById.set(pupil.student_id, pupil.class_id);
     if (!totalsByPupil.has(pupil.student_id)) totalsByPupil.set(pupil.student_id, []);
@@ -439,11 +463,16 @@ export async function computeTermResults(
         aggregateSubjectCount: settings.aggregate_subject_count,
         positionBasis: settings.position_basis,
         passMark: settings.pass_mark,
+        level: classResult.level,
+        subjects: subjectResultsByPupil.get(studentId) ?? [],
       }),
     }));
     const positions = competitionRanks(summaries.map(({ summary }) => summary.positionScore));
     for (const [index, item] of summaries.entries()) {
-      const snapshot = summarySnapshotByClass.get(classId) ?? {};
+      const snapshot = {
+        ...(summarySnapshotByClass.get(classId) ?? {}),
+        aggregateSubjects: item.summary.aggregateSubjects,
+      };
       const overallScale = await sql<{ min_score: number; max_score: number; label: string }>`
         SELECT b.min_score, b.max_score, b.label
         FROM grading_scales g

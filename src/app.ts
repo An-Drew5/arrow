@@ -21,6 +21,7 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "32kb" }));
 
 app.use("/api/v1", tenantRoutes);
+app.use("/api/v1/platform", platformRoutes);
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1", peopleRoutes);
 app.use("/api/v1", auditRoutes);
@@ -29,7 +30,6 @@ app.use("/api/v1", academicCoreRoutes);
 app.use("/api/v1", attendanceRoutes);
 app.use("/api/v1", teacherRoutes);
 app.use("/api/v1", schoolRoutes);
-app.use("/api/v1/platform", platformRoutes);
 
 app.get("/api/v1/health", async (_request, response) => {
   const checks: Record<string, "ok" | "error"> = {

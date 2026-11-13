@@ -7,6 +7,7 @@ import { Pool, type PoolClient } from "pg";
 import { sql, type Transaction } from "kysely";
 import { app } from "../src/app";
 import { createAccessToken } from "../src/auth/token";
+import { env } from "../src/shared/config/env";
 import { closeDatabase } from "../src/shared/db/database";
 import { asyncHandler } from "../src/shared/middleware/async-handler";
 import { errorHandler } from "../src/shared/middleware/errors";
@@ -703,14 +704,50 @@ describe("Phase 1 tenant isolation", () => {
   it("lets an admin registered through the API log in after school approval", async () => {
     const slug = `registration-${randomUUID()}`;
     const email = `admin-${slug}@example.test`;
+    const teacherEmail = `teacher-${slug}@example.test`;
+    const subjectOnlyTeacherEmail = `subject-only-${slug}@example.test`;
     let schoolId: string | undefined;
     let academicYearId: string | undefined;
     let termId: string | undefined;
     let classId: string | undefined;
     let subjectId: string | undefined;
+    let mathsSubjectId: string | undefined;
+    let scienceSubjectId: string | undefined;
     let studentId: string | undefined;
+    const additionalStudentIds: string[] = [];
+    let teacherUserId: string | undefined;
+    let platformAdminUserId: string | undefined;
+    let previousPlatformAdmin: { password_hash: string; status: string } | undefined;
+    let platformRefreshTokenHash: string | undefined;
 
     try {
+      const platformPasswordHash = await argon2.hash("Platform-test-password-42!");
+      const existingPlatformAdmin = await migrationPool.query<{
+        id: string;
+        password_hash: string;
+        status: string;
+      }>(
+        "SELECT id, password_hash, status FROM users WHERE lower(email) = lower($1)",
+        [env.PLATFORM_ADMIN_EMAIL],
+      );
+      if (existingPlatformAdmin.rows[0]) {
+        platformAdminUserId = existingPlatformAdmin.rows[0].id;
+        previousPlatformAdmin = {
+          password_hash: existingPlatformAdmin.rows[0].password_hash,
+          status: existingPlatformAdmin.rows[0].status,
+        };
+        await migrationPool.query(
+          "UPDATE users SET password_hash = $1, status = 'active' WHERE id = $2",
+          [platformPasswordHash, platformAdminUserId],
+        );
+      } else {
+        const insertedPlatformAdmin = await migrationPool.query<{ id: string }>(
+          "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+          [env.PLATFORM_ADMIN_EMAIL, platformPasswordHash],
+        );
+        platformAdminUserId = insertedPlatformAdmin.rows[0]!.id;
+      }
+
       const registered = await request(app).post("/api/v1/schools").send({
         name: "Registered School",
         slug,
@@ -742,10 +779,23 @@ describe("Phase 1 tenant isolation", () => {
       expect(pendingLogin.status).toBe(403);
       expect(pendingLogin.body.code).toBe("SCHOOL_UNAVAILABLE");
 
-      await migrationPool.query(
-        "UPDATE schools SET status = 'active' WHERE id = $1",
-        [schoolId],
-      );
+      const platformLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: env.PLATFORM_ADMIN_EMAIL,
+        password: "Platform-test-password-42!",
+      });
+      expect(platformLogin.status).toBe(200);
+      const platformCookie = readRefreshCookie(platformLogin.headers["set-cookie"]);
+      if (platformCookie) {
+        platformRefreshTokenHash = createHash("sha256")
+          .update(decodeURIComponent(platformCookie.split("=")[1]!))
+          .digest("hex");
+      }
+      const approval = await request(app)
+        .post(`/api/v1/platform/schools/${schoolId}/approve`)
+        .set("Authorization", `Bearer ${platformLogin.body.accessToken as string}`)
+        .send({});
+      expect(approval.status).toBe(200);
+      expect(approval.body.school).toMatchObject({ id: schoolId, status: "active" });
       const login = await request(app).post("/api/v1/auth/login").send({
         identifier: email,
         password,
@@ -763,9 +813,29 @@ describe("Phase 1 tenant isolation", () => {
       const year = await request(app)
         .post("/api/v1/academic-years")
         .set(authorization)
-        .send({ name: "2025-2026", startDate: "2025-09-01", endDate: "2026-07-31" });
+        .send({ name: "2025-2027", startDate: "2025-09-01", endDate: "2027-07-31" });
       expect(year.status).toBe(201);
       academicYearId = year.body.id as string;
+      const roles = await request(app).get("/api/v1/roles").set(authorization);
+      expect(roles.status).toBe(200);
+      expect(roles.body.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          name: "class_teacher",
+          permissions: expect.arrayContaining(["attendance:write"]),
+        }),
+        expect.objectContaining({
+          name: "subject_teacher",
+          permissions: expect.arrayContaining(["scores:write"]),
+        }),
+      ]));
+      const classTeacherRole = roles.body.items.find(
+        (role: { name: string }) => role.name === "class_teacher",
+      ) as { id: string } | undefined;
+      const subjectTeacherRole = roles.body.items.find(
+        (role: { name: string }) => role.name === "subject_teacher",
+      ) as { id: string } | undefined;
+      expect(classTeacherRole).toBeDefined();
+      expect(subjectTeacherRole).toBeDefined();
 
       const term = await request(app)
         .post(`/api/v1/academic-years/${academicYearId}/terms`)
@@ -784,7 +854,7 @@ describe("Phase 1 tenant isolation", () => {
       const subject = await request(app)
         .post("/api/v1/subjects")
         .set(authorization)
-        .send({ name: "Mathematics", code: `M-${slug.slice(-8)}` });
+        .send({ name: "English", code: `E-${slug.slice(-8)}` });
       expect(subject.status).toBe(201);
       subjectId = subject.body.id as string;
 
@@ -793,6 +863,28 @@ describe("Phase 1 tenant isolation", () => {
         .set(authorization)
         .send({ subjectId });
       expect(classSubject.status).toBe(201);
+      const mathsSubject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "Maths", code: `M-${slug.slice(-8)}` });
+      expect(mathsSubject.status).toBe(201);
+      mathsSubjectId = mathsSubject.body.id as string;
+      const mathsClassSubject = await request(app)
+        .post(`/api/v1/classes/${classId}/subjects`)
+        .set(authorization)
+        .send({ subjectId: mathsSubjectId });
+      expect(mathsClassSubject.status).toBe(201);
+      const scienceSubject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "Science", code: `S-${slug.slice(-8)}` });
+      expect(scienceSubject.status).toBe(201);
+      scienceSubjectId = scienceSubject.body.id as string;
+      const scienceClassSubject = await request(app)
+        .post(`/api/v1/classes/${classId}/subjects`)
+        .set(authorization)
+        .send({ subjectId: scienceSubjectId });
+      expect(scienceClassSubject.status).toBe(201);
 
       const student = await request(app)
         .post("/api/v1/students")
@@ -829,15 +921,297 @@ describe("Phase 1 tenant isolation", () => {
         .set(authorization)
         .send({ academicYearId, classId });
       expect(enrollment.status).toBe(201);
+
+      for (const [index, firstName] of ["Kojo", "Abena", "Yaw"].entries()) {
+        const created = await request(app)
+          .post("/api/v1/students")
+          .set(authorization)
+          .send({
+            admissionNo: `ADM-${slug.slice(-6)}-${index + 2}`,
+            firstName,
+            lastName: "Mensah",
+            dateOfBirth: "2018-03-14",
+            gender: index === 1 ? "female" : "male",
+          });
+        expect(created.status).toBe(201);
+        const id = created.body.id as string;
+        additionalStudentIds.push(id);
+        const enrolled = await request(app)
+          .post(`/api/v1/students/${id}/enrollments`)
+          .set(authorization)
+          .send({ academicYearId, classId });
+        expect(enrolled.status).toBe(201);
+      }
+
+      const subjectOnlyTeacher = await request(app)
+        .post("/api/v1/users")
+        .set(authorization)
+        .send({
+          email: subjectOnlyTeacherEmail,
+          password: "Teacher-password-42!",
+          roleIds: [subjectTeacherRole!.id],
+        });
+      expect(subjectOnlyTeacher.status).toBe(201);
+      const invalidAllSubjectsAssignment = await request(app)
+        .post("/api/v1/teacher-assignments")
+        .set(authorization)
+        .send({
+          membershipId: subjectOnlyTeacher.body.membershipId,
+          classId,
+          type: "all_subjects",
+          academicYearId,
+          startDate: "2025-09-01",
+        });
+      expect(invalidAllSubjectsAssignment.status).toBe(400);
+      expect(invalidAllSubjectsAssignment.body.code).toBe(
+        "ALL_SUBJECTS_REQUIRES_TEACHER_ROLES",
+      );
+
+      const teacher = await request(app)
+        .post("/api/v1/users")
+        .set(authorization)
+        .send({
+          email: teacherEmail,
+          password: "Teacher-password-42!",
+          roleIds: [classTeacherRole!.id, subjectTeacherRole!.id],
+        });
+      expect(teacher.status).toBe(201);
+      teacherUserId = teacher.body.userId as string;
+      const assignment = await request(app)
+        .post("/api/v1/teacher-assignments")
+        .set(authorization)
+        .send({
+          membershipId: teacher.body.membershipId,
+          classId,
+          type: "all_subjects",
+          academicYearId,
+          startDate: "2025-09-01",
+        });
+      expect(assignment.status).toBe(201);
+
+      const teacherLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: teacherEmail,
+        password: "Teacher-password-42!",
+        schoolSlug: slug,
+      });
+      expect(teacherLogin.status).toBe(200);
+      const teacherAuthorization = {
+        Authorization: `Bearer ${teacherLogin.body.accessToken as string}`,
+      };
+      const teacherAssessments = await request(app)
+        .get(`/api/v1/classes/${classId}/assessments`)
+        .set(teacherAuthorization);
+      expect(teacherAssessments.status).toBe(200);
+      expect(teacherAssessments.body.items).toHaveLength(15);
+
+      const pupilIds = [studentId!, ...additionalStudentIds];
+      const englishId = subjectId!;
+      const mathsId = mathsSubjectId!;
+      const scienceId = scienceSubjectId!;
+      const scoreVectors: Record<string, Array<{
+        marks: Array<number | null>;
+        statuses?: Array<"scored" | "absent" | "excused">;
+      }>> = {
+        [englishId]: [
+          { marks: [12, 10, 14, 9, 70] },
+          {
+            marks: [15, 12, null, 10, 80],
+            statuses: ["scored", "scored", "excused", "scored", "scored"],
+          },
+          {
+            marks: [15, null, 14, 9, 70],
+            statuses: ["scored", "absent", "scored", "scored", "scored"],
+          },
+          { marks: [10, 10, 10, 10, 60] },
+        ],
+        [mathsId]: [
+          { marks: [15, 15, 15, 15, 90] },
+          { marks: [10, 10, 10, 10, 45] },
+          { marks: [6, 6, 6, 6, 33] },
+          { marks: [10, 10, 10, 10, 60] },
+        ],
+        [scienceId]: [
+          { marks: [8, 9, 10, 7, 55] },
+          { marks: [12, 12, 12, 12, 60] },
+          { marks: [5, 5, 5, 5, 40] },
+          { marks: [10, 10, 10, 10, null] },
+        ],
+      };
+      const assessmentIndexes: Record<string, number> = {
+        "Class exercise": 0,
+        "Group work": 1,
+        "Class test": 2,
+        "Project work": 3,
+        Exam: 4,
+      };
+      for (const assessment of teacherAssessments.body.items as Array<{
+        id: string;
+        subjectId: string;
+        name: string;
+      }>) {
+        const markIndex = assessmentIndexes[assessment.name];
+        expect(markIndex).toBeDefined();
+        const vectors = scoreVectors[assessment.subjectId];
+        expect(vectors).toBeDefined();
+        const items = pupilIds.flatMap((id, pupilIndex) => {
+          const vector = vectors![pupilIndex]!;
+          const mark = vector.marks[markIndex!] ?? null;
+          if (assessment.subjectId === scienceId && pupilIndex === 3 && markIndex === 4) {
+            return [];
+          }
+          const status = vector.statuses?.[markIndex!] ?? "scored";
+          return [{
+            clientId: randomUUID(),
+            studentId: id,
+            ...(mark === null ? {} : { mark }),
+            status: mark === null && status === "scored" ? "absent" : status,
+          }];
+        });
+        const saved = await request(app)
+          .put(`/api/v1/assessments/${assessment.id}/scores`)
+          .set(teacherAuthorization)
+          .send({ items });
+        expect(saved.status).toBe(200);
+      }
+
+      const computed = await request(app)
+        .post(`/api/v1/terms/${termId}/compute-results`)
+        .set(authorization)
+        .send({});
+      expect(computed.status).toBe(200);
+      const results = await request(app)
+        .get(`/api/v1/results?classId=${classId}&termId=${termId}`)
+        .set(authorization);
+      expect(results.status).toBe(200);
+      const resultFor = (pupilId: string, subjectIdForResult: string) =>
+        (results.body.items as Array<{
+          studentId: string;
+          subjectId: string;
+          total: number | string | null;
+          grades: Record<string, string>;
+          subjectPosition: number | null;
+        }>).find((row) =>
+          row.studentId === pupilId && row.subjectId === subjectIdForResult,
+        );
+      const expectResultTotal = (
+        pupilId: string,
+        subjectIdForResult: string,
+        total: number | null,
+      ) => {
+        const result = resultFor(pupilId, subjectIdForResult);
+        expect(result).toBeDefined();
+        expect(result?.total === null ? null : Number(result?.total)).toBe(total);
+      };
+      const pupilA = pupilIds[0]!;
+      const pupilB = pupilIds[1]!;
+      const pupilC = pupilIds[2]!;
+      const pupilD = pupilIds[3]!;
+      expectResultTotal(pupilA, englishId, 73);
+      expect(resultFor(pupilA, englishId)?.grades.letter).toBe("B");
+      expectResultTotal(pupilA, mathsId, 95);
+      expect(resultFor(pupilA, mathsId)?.grades.letter).toBe("A+");
+      expectResultTotal(pupilA, scienceId, 56);
+      expectResultTotal(pupilB, englishId, 81);
+      expectResultTotal(pupilB, mathsId, 56);
+      expectResultTotal(pupilB, scienceId, 70);
+      expectResultTotal(pupilC, englishId, 67);
+      expectResultTotal(pupilC, mathsId, 37);
+      expectResultTotal(pupilC, scienceId, 37);
+      expect(resultFor(pupilD, scienceId)).toMatchObject({
+        total: null,
+        subjectPosition: null,
+      });
+
+      const reportCards = await request(app)
+        .get(`/api/v1/terms/${termId}/report-cards?classId=${classId}`)
+        .set(authorization);
+      expect(reportCards.status).toBe(200);
+      const reportCardFor = (studentName: string) =>
+        (reportCards.body.items as Array<{
+          studentName: string;
+          aggregate: number | null;
+          average: number | null;
+          overallPosition: string | null;
+        }>).find((item) => item.studentName === studentName);
+      expect(reportCardFor("Ama Mensah")).toMatchObject({
+        aggregate: 224,
+        average: 75,
+        overallPosition: "1st",
+      });
+      expect(reportCardFor("Kojo Mensah")).toMatchObject({
+        aggregate: 207,
+        overallPosition: "2nd",
+      });
+      expect(reportCardFor("Abena Mensah")).toMatchObject({
+        aggregate: 141,
+        overallPosition: "3rd",
+      });
+      expect(reportCardFor("Yaw Mensah")).toMatchObject({
+        aggregate: null,
+        overallPosition: null,
+      });
+
+      const locked = await request(app)
+        .post(`/api/v1/terms/${termId}/lock`)
+        .set(authorization)
+        .send({});
+      expect(locked.status).toBe(200);
+      const lockedAssessment = (teacherAssessments.body.items as Array<{ id: string }>)[0]!;
+      const lockedWrite = await request(app)
+        .put(`/api/v1/assessments/${lockedAssessment.id}/scores`)
+        .set(teacherAuthorization)
+        .send({
+          items: [{
+            clientId: randomUUID(),
+            studentId: pupilA,
+            mark: 11,
+            status: "scored",
+          }],
+        });
+      expect(lockedWrite.status).toBe(409);
+      expect(lockedWrite.body.items).toMatchObject([
+        { outcome: "rejected", reason: "TERM_LOCKED" },
+      ]);
     } finally {
       if (schoolId) {
         await inMigrationSchool(schoolId, async (client) => {
           await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
+          await client.query(
+            `DELETE FROM score_versions WHERE score_id IN (
+              SELECT id FROM scores WHERE assessment_id IN (
+                SELECT id FROM assessments WHERE class_id = $1
+              )
+            )`,
+            [classId],
+          );
+          await client.query(
+            `DELETE FROM scores WHERE assessment_id IN (
+              SELECT id FROM assessments WHERE class_id = $1
+            )`,
+            [classId],
+          );
+          if (termId) {
+            await client.query("DELETE FROM term_summaries WHERE term_id = $1", [termId]);
+            await client.query("DELETE FROM term_results WHERE term_id = $1", [termId]);
+            await client.query("DELETE FROM term_attendance WHERE term_id = $1", [termId]);
+          }
+          if (classId) {
+            await client.query("DELETE FROM teacher_assignments WHERE class_id = $1", [classId]);
+          }
           if (studentId) {
             await client.query("DELETE FROM guardians WHERE student_id = $1", [studentId]);
-            await client.query("DELETE FROM enrollments WHERE student_id = $1", [studentId]);
-            await client.query("DELETE FROM students WHERE id = $1", [studentId]);
           }
+          if (additionalStudentIds.length > 0) {
+            await client.query(
+              "DELETE FROM guardians WHERE student_id = ANY($1::uuid[])",
+              [additionalStudentIds],
+            );
+          }
+          const allStudentIds = [studentId, ...additionalStudentIds].filter(
+            (id): id is string => id !== undefined,
+          );
+          await client.query("DELETE FROM enrollments WHERE student_id = ANY($1::uuid[])", [allStudentIds]);
+          await client.query("DELETE FROM students WHERE id = ANY($1::uuid[])", [allStudentIds]);
           if (classId) {
             await client.query("DELETE FROM assessments WHERE class_id = $1", [classId]);
             await client.query("DELETE FROM class_subjects WHERE class_id = $1", [classId]);
@@ -848,11 +1222,15 @@ describe("Phase 1 tenant isolation", () => {
           if (classId) {
             await client.query("DELETE FROM classes WHERE id = $1", [classId]);
           }
-          if (subjectId) {
-            await client.query("DELETE FROM subjects WHERE id = $1", [subjectId]);
-          }
+          const allSubjectIds = [subjectId, mathsSubjectId, scienceSubjectId].filter(
+            (id): id is string => id !== undefined,
+          );
+          await client.query("DELETE FROM subjects WHERE id = ANY($1::uuid[])", [allSubjectIds]);
           if (academicYearId) {
             await client.query("DELETE FROM academic_years WHERE id = $1", [academicYearId]);
+          }
+          if (teacherUserId) {
+            await client.query("DELETE FROM memberships WHERE user_id = $1", [teacherUserId]);
           }
           await client.query("DELETE FROM grade_bands WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM grading_scheme_overrides WHERE school_id = $1", [schoolId]);
@@ -866,8 +1244,38 @@ describe("Phase 1 tenant isolation", () => {
           "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
           [email],
         );
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+          [teacherEmail],
+        );
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+          [subjectOnlyTeacherEmail],
+        );
         await migrationPool.query("DELETE FROM users WHERE email = $1", [email]);
+        await migrationPool.query("DELETE FROM users WHERE email = $1", [teacherEmail]);
+        await migrationPool.query("DELETE FROM users WHERE email = $1", [subjectOnlyTeacherEmail]);
         await migrationPool.query("DELETE FROM schools WHERE id = $1", [schoolId]);
+      }
+      if (platformRefreshTokenHash) {
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE token_hash = $1",
+          [platformRefreshTokenHash],
+        );
+      }
+      if (platformAdminUserId) {
+        if (previousPlatformAdmin) {
+          await migrationPool.query(
+            "UPDATE users SET password_hash = $1, status = $2 WHERE id = $3",
+            [
+              previousPlatformAdmin.password_hash,
+              previousPlatformAdmin.status,
+              platformAdminUserId,
+            ],
+          );
+        } else {
+          await migrationPool.query("DELETE FROM users WHERE id = $1", [platformAdminUserId]);
+        }
       }
     }
   });

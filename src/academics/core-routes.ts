@@ -969,8 +969,8 @@ academicCoreRoutes.get(
     `.execute(tx);
     if (!settings.rows[0]) throw new Error("School settings are missing");
 
-    const classRows = await sql<{ id: string; name: string }>`
-      SELECT id, name FROM classes
+    const classRows = await sql<{ id: string; name: string; level: number }>`
+      SELECT id, name, level FROM classes
       WHERE school_id = ${currentActor.schoolId}::uuid
         AND academic_year_id = ${term.academic_year_id}::uuid
         AND (${filters.data.classId ?? null}::uuid IS NULL OR id = ${filters.data.classId ?? null}::uuid)
@@ -1115,11 +1115,29 @@ academicCoreRoutes.get(
           AND ts.aggregate IS NULL
         ORDER BY e.roll_number
       `.execute(tx);
+      const coreSubjectCount = classroom.level >= 7
+        ? await sql<{ count: number }>`
+            SELECT count(*)::integer AS count
+            FROM class_subjects cs
+            JOIN subjects s
+              ON s.school_id = cs.school_id AND s.id = cs.subject_id
+            WHERE cs.school_id = ${currentActor.schoolId}::uuid
+              AND cs.class_id = ${classroom.id}::uuid
+              AND s.is_core
+          `.execute(tx)
+        : null;
+      const warnings = coreSubjectCount && coreSubjectCount.rows[0]!.count < 4
+        ? [{
+            code: "FEWER_THAN_FOUR_CORE_SUBJECTS",
+            message: "Fewer than four subjects are flagged as core for this JHS class.",
+          }]
+        : [];
       const ready = missing.rows.length === 0 &&
         missingRegisters.rows.length === 0 && unrankable.rows.length === 0;
       output.push({
         classId: classroom.id,
         className: classroom.name,
+        warnings,
         missingMarks: missing.rows,
         missingRegisters: missingRegisters.rows,
         identicalMarks: identicalMarks.rows,

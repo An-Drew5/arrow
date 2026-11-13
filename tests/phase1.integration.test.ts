@@ -862,6 +862,13 @@ describe("Phase 1 tenant isolation", () => {
       expect(subject.status).toBe(201);
       expect(subject.body.isCore).toBe(true);
       subjectId = subject.body.id as string;
+      const englishLanguageSubject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "English Language", code: `EL-${slug.slice(-8)}` });
+      expect(englishLanguageSubject.status).toBe(201);
+      expect(englishLanguageSubject.body.isCore).toBe(true);
+      jhsSubjectIds.push(englishLanguageSubject.body.id as string);
 
       const classSubject = await request(app)
         .post(`/api/v1/classes/${classId}/subjects`)
@@ -1223,6 +1230,13 @@ describe("Phase 1 tenant isolation", () => {
         .send({ isCore: false });
       expect(changedCoreFlag.status).toBe(200);
       expect(changedCoreFlag.body.isCore).toBe(false);
+      const readinessWithFewerCoreSubjects = await request(app)
+        .get(`/api/v1/terms/${jhsTermId}/readiness?classId=${jhsClassId}`)
+        .set(authorization);
+      expect(readinessWithFewerCoreSubjects.status).toBe(200);
+      expect(readinessWithFewerCoreSubjects.body.classes[0].warnings).toContainEqual(
+        expect.objectContaining({ code: "FEWER_THAN_FOUR_CORE_SUBJECTS" }),
+      );
       const restoredCoreFlag = await request(app)
         .patch(`/api/v1/subjects/${jhsSubjects[0]!.id}`)
         .set(authorization)

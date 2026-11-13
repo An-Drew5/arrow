@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { z } from "zod";
 import { recordAudit } from "../audit/service";
 import { ensureClassSubjectAssessments, ensureTermAssessments } from "./assessment-service";
+import { isCoreSubjectName } from "./subject-utils";
 import { decryptPii, encryptPii } from "../shared/crypto/pii";
 import { HttpError } from "../shared/errors/http-error";
 import { asyncHandler } from "../shared/middleware/async-handler";
@@ -158,16 +159,6 @@ function parseId(value: string | undefined): string {
     throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", parsed.error.issues);
   }
   return parsed.data;
-}
-
-function isCoreSubjectName(name: string): boolean {
-  return [
-    "english",
-    "mathematics",
-    "integrated science",
-    "science",
-    "social studies",
-  ].includes(name.trim().toLowerCase());
 }
 
 function actor(request: RequestWithTenant) {

@@ -2,6 +2,7 @@ export const permissions = [
   "school:manage",
   "academics:manage",
   "users:manage",
+  "users:read",
   "roles:manage",
   "audit:read",
   "students:read",

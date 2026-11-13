@@ -41,6 +41,35 @@ function actor(request: RequestWithTenant) {
   };
 }
 
+function assessmentScopePredicate(membershipId: string) {
+  return sql`(
+    EXISTS (
+      SELECT 1 FROM membership_roles mr
+      JOIN role_permissions rp
+        ON rp.school_id = mr.school_id AND rp.role_id = mr.role_id
+      WHERE mr.school_id = a.school_id
+        AND mr.membership_id = ${membershipId}::uuid
+        AND rp.permission IN ('academics:manage', 'terms:lock')
+    )
+    OR EXISTS (
+      SELECT 1 FROM teacher_assignments ta
+      JOIN academic_years ay
+        ON ay.school_id = ta.school_id AND ay.id = ta.academic_year_id
+      WHERE ta.school_id = a.school_id
+        AND ta.membership_id = ${membershipId}::uuid
+        AND ta.class_id = a.class_id
+        AND ta.academic_year_id = a.academic_year_id
+        AND ay.status = 'open'
+        AND ta.start_date <= CURRENT_DATE
+        AND (ta.end_date IS NULL OR ta.end_date >= CURRENT_DATE)
+        AND (
+          ta.assignment_type IN ('class_teacher', 'all_subjects')
+          OR (ta.assignment_type = 'subject' AND ta.subject_id = a.subject_id)
+        )
+    )
+  )`;
+}
+
 async function auditDenied(
   request: RequestWithTenant,
   permission: string,
@@ -99,7 +128,7 @@ academicCoreRoutes.put(
       JOIN terms t ON t.school_id = a.school_id AND t.id = a.term_id
       WHERE a.school_id = ${currentActor.schoolId}::uuid
         AND a.id = ${assessmentId.data}::uuid
-    `.execute(tx);
+    `.execute(tx)
     const assessment = assessmentResult.rows[0];
     if (!assessment) throw new HttpError(404, "NOT_FOUND", "Assessment not found");
     await requireScope(request as RequestWithTenant, "scores:write", {
@@ -287,7 +316,10 @@ academicCoreRoutes.put(
     if (hasAppliedWrite && assessment.term_status === "locked") {
       await computeTermResults(tx, currentActor.schoolId, assessment.term_id);
     }
-    response.json({ items: outcomes });
+    const allRejectedByTermLock = outcomes.length > 0 && outcomes.every(
+      (outcome) => outcome.outcome === "rejected" && outcome.reason === "TERM_LOCKED",
+    );
+    response.status(allRejectedByTermLock ? 409 : 200).json({ items: outcomes });
   }),
 );
 
@@ -682,6 +714,84 @@ academicCoreRoutes.get(
 );
 
 academicCoreRoutes.get(
+  "/classes/:id/assessments",
+  asyncHandler(async (request, response) => {
+    const classId = idSchema.safeParse(request.params.id);
+    if (!classId.success) {
+      throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", classId.error.issues);
+    }
+    const currentActor = actor(request as RequestWithTenant);
+    const { tx } = context(request as RequestWithTenant);
+    await requireScope(request as RequestWithTenant, "scores:read", {
+      type: "class",
+      id: classId.data,
+    }, true);
+    const classroom = await sql<{ id: string; name: string; academic_year_id: string }>`
+      SELECT id, name, academic_year_id FROM classes
+      WHERE school_id = ${currentActor.schoolId}::uuid
+        AND id = ${classId.data}::uuid
+    `.execute(tx);
+    if (!classroom.rows[0]) throw new HttpError(404, "NOT_FOUND", "Class not found");
+
+    const term = await sql<{ id: string; name: string }>`
+      SELECT id, name FROM terms
+      WHERE school_id = ${currentActor.schoolId}::uuid
+        AND academic_year_id = ${classroom.rows[0].academic_year_id}::uuid
+        AND status = 'open'
+      ORDER BY (CURRENT_DATE BETWEEN start_date AND end_date) DESC, start_date DESC
+      LIMIT 1
+    `.execute(tx);
+    const assessmentRows = term.rows[0]
+      ? await sql<{
+          id: string;
+          subject_id: string;
+          subject_name: string;
+          name: string;
+          kind: string;
+          max_mark: string;
+          component: string | null;
+        }>`
+          SELECT a.id, a.subject_id, s.name AS subject_name, a.name, a.kind,
+            a.max_mark::text AS max_mark, sc.kind AS component
+          FROM assessments a
+          JOIN subjects s ON s.school_id = a.school_id AND s.id = a.subject_id
+          LEFT JOIN scheme_components sc
+            ON sc.school_id = a.school_id AND sc.id = a.scheme_component_id
+          WHERE a.school_id = ${currentActor.schoolId}::uuid
+            AND a.class_id = ${classId.data}::uuid
+            AND a.term_id = ${term.rows[0].id}::uuid
+            AND ${assessmentScopePredicate(currentActor.membershipId)}
+          ORDER BY s.name, sc.sort_order, a.name
+        `.execute(tx)
+      : { rows: [] as Array<{
+          id: string;
+          subject_id: string;
+          subject_name: string;
+          name: string;
+          kind: string;
+          max_mark: string;
+          component: string | null;
+        }> };
+    response.json({
+      class: {
+        id: classroom.rows[0].id,
+        name: classroom.rows[0].name,
+      },
+      term: term.rows[0] ?? null,
+      items: assessmentRows.rows.map((item) => ({
+        id: item.id,
+        subjectId: item.subject_id,
+        subjectName: item.subject_name,
+        name: item.name,
+        kind: item.kind,
+        maxMark: item.max_mark,
+        component: item.component,
+      })),
+    });
+  }),
+);
+
+academicCoreRoutes.get(
   "/sync/bootstrap",
   asyncHandler(async (request, response) => {
     const query = z.object({ classId: idSchema }).strict().safeParse(request.query);
@@ -739,27 +849,7 @@ academicCoreRoutes.get(
           ON sc.school_id = a.school_id AND sc.id = a.scheme_component_id
         WHERE a.school_id = ${currentActor.schoolId}::uuid
           AND a.class_id = ${classroom.id}::uuid AND a.term_id = ${term.id}::uuid
-          AND (
-            EXISTS (
-              SELECT 1 FROM membership_roles mr
-              JOIN role_permissions rp ON rp.school_id = mr.school_id AND rp.role_id = mr.role_id
-              WHERE mr.school_id = a.school_id AND mr.membership_id = ${currentActor.membershipId}::uuid
-                AND rp.permission IN ('academics:manage', 'terms:lock')
-            )
-            OR EXISTS (
-              SELECT 1 FROM teacher_assignments ta
-              JOIN academic_years ay ON ay.school_id = ta.school_id AND ay.id = ta.academic_year_id
-              WHERE ta.school_id = a.school_id
-                AND ta.membership_id = ${currentActor.membershipId}::uuid
-                AND ta.class_id = a.class_id AND ta.academic_year_id = a.academic_year_id
-                AND ay.status = 'open' AND ta.start_date <= CURRENT_DATE
-                AND (ta.end_date IS NULL OR ta.end_date >= CURRENT_DATE)
-                AND (
-                  ta.assignment_type IN ('class_teacher', 'all_subjects')
-                  OR (ta.assignment_type = 'subject' AND ta.subject_id = a.subject_id)
-                )
-            )
-          )
+          AND ${assessmentScopePredicate(currentActor.membershipId)}
         ORDER BY s.name, a.name
       `.execute(tx);
       assessments = assessmentRows.rows.map((item) => ({
@@ -785,29 +875,7 @@ academicCoreRoutes.get(
         JOIN assessments a ON a.school_id = scores.school_id AND a.id = scores.assessment_id
         WHERE scores.school_id = ${currentActor.schoolId}::uuid
           AND a.class_id = ${classroom.id}::uuid AND a.term_id = ${term.id}::uuid
-          AND EXISTS (
-            SELECT 1 FROM membership_roles mr
-            JOIN role_permissions rp ON rp.school_id = mr.school_id AND rp.role_id = mr.role_id
-            WHERE mr.school_id = a.school_id AND mr.membership_id = ${currentActor.membershipId}::uuid
-              AND rp.permission IN ('academics:manage', 'terms:lock')
-          )
-          OR (
-            scores.school_id = ${currentActor.schoolId}::uuid
-            AND a.class_id = ${classroom.id}::uuid AND a.term_id = ${term.id}::uuid
-            AND EXISTS (
-              SELECT 1 FROM teacher_assignments ta
-              JOIN academic_years ay ON ay.school_id = ta.school_id AND ay.id = ta.academic_year_id
-              WHERE ta.school_id = a.school_id
-                AND ta.membership_id = ${currentActor.membershipId}::uuid
-                AND ta.class_id = a.class_id AND ta.academic_year_id = a.academic_year_id
-                AND ay.status = 'open' AND ta.start_date <= CURRENT_DATE
-                AND (ta.end_date IS NULL OR ta.end_date >= CURRENT_DATE)
-                AND (
-                  ta.assignment_type IN ('class_teacher', 'all_subjects')
-                  OR (ta.assignment_type = 'subject' AND ta.subject_id = a.subject_id)
-                )
-            )
-          )
+          AND ${assessmentScopePredicate(currentActor.membershipId)}
         ORDER BY scores.student_id
       `.execute(tx);
       scores = scoreRows.rows;

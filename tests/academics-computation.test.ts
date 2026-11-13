@@ -208,8 +208,20 @@ describe("academic result computation", () => {
   });
 
   it("rejects fractional marks beyond one decimal place and invalid weights", () => {
+    expect(calculateResult({
+      components: [{ kind: "sba", name: "SBA", maxMark: "15.00", score: { mark: "12.00", status: "scored" } }],
+      sbaWeight: 50,
+      examWeight: 50,
+      scales: [],
+    }).sbaRaw).toBe(12);
     expect(() => calculateResult({
       components: [{ kind: "sba", name: "SBA", maxMark: 10, score: { mark: 1.25, status: "scored" } }],
+      sbaWeight: 50,
+      examWeight: 50,
+      scales: [],
+    })).toThrow(/one decimal place/);
+    expect(() => calculateResult({
+      components: [{ kind: "sba", name: "SBA", maxMark: 15, score: { mark: "12.01", status: "scored" } }],
       sbaWeight: 50,
       examWeight: 50,
       scales: [],

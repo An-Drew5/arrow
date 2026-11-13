@@ -50,7 +50,10 @@ export interface ResultCalculation {
 }
 
 function tenths(value: string | number): number {
-  const text = String(value);
+  const rawText = String(value);
+  const text = rawText.includes(".")
+    ? rawText.replace(/0+$/, "").replace(/\.$/, "")
+    : rawText;
   const match = /^(0|[1-9]\d*)(?:\.(\d))?$/.exec(text);
   if (!match) throw new RangeError("Marks must be non-negative with at most one decimal place");
   return Number(match[1]) * 10 + Number(match[2] ?? "0");

@@ -43,12 +43,10 @@ export const errorHandler: ErrorRequestHandler = (
     "type" in error &&
     error.type === "entity.parse.failed"
   ) {
-    response
-      .status(400)
-      .json({
-        code: "INVALID_JSON",
-        message: "Request body must be valid JSON",
-      });
+    response.status(400).json({
+      code: "INVALID_JSON",
+      message: "Request body must be valid JSON",
+    });
     return;
   }
   if (
@@ -57,12 +55,10 @@ export const errorHandler: ErrorRequestHandler = (
     "status" in error &&
     error.status === 413
   ) {
-    response
-      .status(413)
-      .json({
-        code: "PAYLOAD_TOO_LARGE",
-        message: "Request body is too large",
-      });
+    response.status(413).json({
+      code: "PAYLOAD_TOO_LARGE",
+      message: "Request body is too large",
+    });
     return;
   }
 

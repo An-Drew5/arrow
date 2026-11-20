@@ -88,12 +88,10 @@ authRoutes.post("/refresh", async (request, response, next) => {
   }
   const token = readRefreshCookie(request.headers.cookie);
   if (!token) {
-    response
-      .status(401)
-      .json({
-        code: "INVALID_REFRESH_TOKEN",
-        message: "Refresh token is required",
-      });
+    response.status(401).json({
+      code: "INVALID_REFRESH_TOKEN",
+      message: "Refresh token is required",
+    });
     return;
   }
 

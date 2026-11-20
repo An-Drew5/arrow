@@ -139,3 +139,27 @@ peopleRoutes.post(
     response.status(201).json({ userId, membershipId });
   }),
 );
+
+peopleRoutes.get(
+  "/roles",
+  tenantContext,
+  requirePermission("users:read"),
+  asyncHandler(async (request, response) => {
+    const { tx } = (request as RequestWithTenant).tenantContext;
+    const roles = await sql<{
+      id: string;
+      name: string;
+      permissions: string[];
+    }>`
+      SELECT r.id, r.name,
+        coalesce(array_agg(rp.permission ORDER BY rp.permission)
+          FILTER (WHERE rp.permission IS NOT NULL), '{}') AS permissions
+      FROM roles r
+      LEFT JOIN role_permissions rp
+        ON rp.school_id = r.school_id AND rp.role_id = r.id
+      GROUP BY r.id, r.name
+      ORDER BY r.name
+    `.execute(tx);
+    response.json({ items: roles.rows });
+  }),
+);

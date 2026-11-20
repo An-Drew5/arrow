@@ -7,6 +7,7 @@ import { Pool, type PoolClient } from "pg";
 import { sql, type Transaction } from "kysely";
 import { app } from "../src/app";
 import { createAccessToken } from "../src/auth/token";
+import { env } from "../src/shared/config/env";
 import { closeDatabase } from "../src/shared/db/database";
 import { asyncHandler } from "../src/shared/middleware/async-handler";
 import { errorHandler } from "../src/shared/middleware/errors";
@@ -36,14 +37,45 @@ const fixture = {
   slugB: `school-b-${randomUUID()}`,
 };
 
-const tenantTables = [
+const probeTables = [
   "memberships",
   "roles",
   "role_permissions",
   "membership_roles",
   "audit_log",
 ] as const;
+const tenantTables = [
+  ...probeTables,
+  "academic_years",
+  "terms",
+  "classes",
+  "subjects",
+  "class_subjects",
+  "students",
+  "guardians",
+  "enrollments",
+  "teacher_assignments",
+  "grading_schemes",
+  "grading_scheme_overrides",
+  "grade_bands",
+  "assessments",
+  "scores",
+  "score_versions",
+  "term_results",
+  "attendance",
+  "import_jobs",
+  "school_settings",
+  "student_subject_opt_outs",
+  "scheme_components",
+  "grading_scales",
+  "term_summaries",
+  "attendance_registers",
+  "school_closures",
+  "term_attendance",
+  "attendance_versions",
+] as const;
 type TenantTable = (typeof tenantTables)[number];
+type ProbeTable = (typeof probeTables)[number];
 type ProbeOperation = "select" | "insert" | "update" | "delete";
 
 interface Probe {
@@ -58,7 +90,7 @@ interface Probe {
 }
 
 let tokenA: string;
-const probes: Record<TenantTable, Probe> = {
+const probes: Record<ProbeTable, Probe> = {
   memberships: {
     select: async (id, tx) =>
       (await sql`SELECT id FROM memberships WHERE id = ${id}::uuid`.execute(tx))
@@ -194,10 +226,10 @@ probeApi.post(
   "/probe/:table/:operation",
   tenantContext,
   asyncHandler(async (request, response) => {
-    const table = request.params.table as TenantTable;
+    const table = request.params.table as ProbeTable;
     const operation = request.params.operation as ProbeOperation;
     if (
-      !tenantTables.includes(table) ||
+      !probeTables.includes(table) ||
       !["select", "insert", "update", "delete"].includes(operation)
     ) {
       response
@@ -385,13 +417,40 @@ describe("Phase 1 tenant isolation", () => {
       ORDER BY c.relname
     `);
     const expected = [
+      "academic_years",
+      "assessments",
+      "attendance",
+      "attendance_registers",
+      "attendance_versions",
       "audit_log",
+      "class_subjects",
+      "classes",
+      "enrollments",
+      "grade_bands",
+      "grading_scales",
+      "grading_scheme_overrides",
+      "grading_schemes",
+      "guardians",
+      "import_jobs",
       "memberships",
       "membership_roles",
       "refresh_tokens",
       "role_permissions",
       "roles",
+      "score_versions",
+      "scores",
+      "scheme_components",
+      "school_closures",
+      "school_settings",
+      "students",
+      "student_subject_opt_outs",
       "schools",
+      "subjects",
+      "teacher_assignments",
+      "term_results",
+      "term_attendance",
+      "term_summaries",
+      "terms",
       "users",
     ].sort();
     expect(tables.rows.map((row) => row.relname)).toEqual(expected);
@@ -467,10 +526,10 @@ describe("Phase 1 tenant isolation", () => {
     }
   });
 
-  it.each(tenantTables)(
+  it.each(probeTables)(
     "blocks direct school B SELECT/INSERT/UPDATE/DELETE on %s",
     async (table) => {
-      const targetIds: Record<TenantTable, string> = {
+      const targetIds: Record<ProbeTable, string> = {
         memberships: fixture.membershipB,
         roles: fixture.roleB,
         role_permissions: fixture.roleB,
@@ -511,10 +570,10 @@ describe("Phase 1 tenant isolation", () => {
     },
   );
 
-  it.each(tenantTables)(
+  it.each(probeTables)(
     "blocks school B CRUD through the tenant API transaction on %s",
     async (table) => {
-      const targetIds: Record<TenantTable, string> = {
+      const targetIds: Record<ProbeTable, string> = {
         memberships: fixture.membershipB,
         roles: fixture.roleB,
         role_permissions: fixture.roleB,
@@ -645,9 +704,54 @@ describe("Phase 1 tenant isolation", () => {
   it("lets an admin registered through the API log in after school approval", async () => {
     const slug = `registration-${randomUUID()}`;
     const email = `admin-${slug}@example.test`;
+    const teacherEmail = `teacher-${slug}@example.test`;
+    const subjectOnlyTeacherEmail = `subject-only-${slug}@example.test`;
     let schoolId: string | undefined;
+    let academicYearId: string | undefined;
+    let termId: string | undefined;
+    let jhsTermId: string | undefined;
+    let classId: string | undefined;
+    let jhsClassId: string | undefined;
+    let subjectId: string | undefined;
+    let mathsSubjectId: string | undefined;
+    let scienceSubjectId: string | undefined;
+    let studentId: string | undefined;
+    let jhsStudentId: string | undefined;
+    const additionalStudentIds: string[] = [];
+    const jhsSubjectIds: string[] = [];
+    let teacherUserId: string | undefined;
+    let platformAdminUserId: string | undefined;
+    let previousPlatformAdmin: { password_hash: string; status: string } | undefined;
+    let platformRefreshTokenHash: string | undefined;
 
     try {
+      const platformPasswordHash = await argon2.hash("Platform-test-password-42!");
+      const existingPlatformAdmin = await migrationPool.query<{
+        id: string;
+        password_hash: string;
+        status: string;
+      }>(
+        "SELECT id, password_hash, status FROM users WHERE lower(email) = lower($1)",
+        [env.PLATFORM_ADMIN_EMAIL],
+      );
+      if (existingPlatformAdmin.rows[0]) {
+        platformAdminUserId = existingPlatformAdmin.rows[0].id;
+        previousPlatformAdmin = {
+          password_hash: existingPlatformAdmin.rows[0].password_hash,
+          status: existingPlatformAdmin.rows[0].status,
+        };
+        await migrationPool.query(
+          "UPDATE users SET password_hash = $1, status = 'active' WHERE id = $2",
+          [platformPasswordHash, platformAdminUserId],
+        );
+      } else {
+        const insertedPlatformAdmin = await migrationPool.query<{ id: string }>(
+          "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+          [env.PLATFORM_ADMIN_EMAIL, platformPasswordHash],
+        );
+        platformAdminUserId = insertedPlatformAdmin.rows[0]!.id;
+      }
+
       const registered = await request(app).post("/api/v1/schools").send({
         name: "Registered School",
         slug,
@@ -656,6 +760,20 @@ describe("Phase 1 tenant isolation", () => {
       });
       expect(registered.status).toBe(201);
       schoolId = registered.body.schoolId as string;
+      const schemes = await inMigrationSchool(schoolId, (client) =>
+        client.query<{ name: string; band_count: number }>(`
+          SELECT gs.name, count(gb.id)::int AS band_count
+          FROM grading_schemes gs
+          LEFT JOIN grade_bands gb ON gb.school_id = gs.school_id AND gb.scheme_id = gs.id
+          WHERE gs.school_id = $1
+          GROUP BY gs.id
+          ORDER BY gs.name
+        `, [schoolId]),
+      );
+      expect(schemes.rows).toEqual([
+        { name: "JHS scheme", band_count: 14 },
+        { name: "Primary scheme", band_count: 19 },
+      ]);
 
       const pendingLogin = await request(app).post("/api/v1/auth/login").send({
         identifier: email,
@@ -665,10 +783,23 @@ describe("Phase 1 tenant isolation", () => {
       expect(pendingLogin.status).toBe(403);
       expect(pendingLogin.body.code).toBe("SCHOOL_UNAVAILABLE");
 
-      await migrationPool.query(
-        "UPDATE schools SET status = 'active' WHERE id = $1",
-        [schoolId],
-      );
+      const platformLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: env.PLATFORM_ADMIN_EMAIL,
+        password: "Platform-test-password-42!",
+      });
+      expect(platformLogin.status).toBe(200);
+      const platformCookie = readRefreshCookie(platformLogin.headers["set-cookie"]);
+      if (platformCookie) {
+        platformRefreshTokenHash = createHash("sha256")
+          .update(decodeURIComponent(platformCookie.split("=")[1]!))
+          .digest("hex");
+      }
+      const approval = await request(app)
+        .post(`/api/v1/platform/schools/${schoolId}/approve`)
+        .set("Authorization", `Bearer ${platformLogin.body.accessToken as string}`)
+        .send({});
+      expect(approval.status).toBe(200);
+      expect(approval.body.school).toMatchObject({ id: schoolId, status: "active" });
       const login = await request(app).post("/api/v1/auth/login").send({
         identifier: email,
         password,
@@ -681,10 +812,614 @@ describe("Phase 1 tenant isolation", () => {
         .set("Authorization", `Bearer ${login.body.accessToken}`);
       expect(me.status).toBe(200);
       expect(me.body.school.id).toBe(schoolId);
+
+      const authorization = { Authorization: `Bearer ${login.body.accessToken}` };
+      const year = await request(app)
+        .post("/api/v1/academic-years")
+        .set(authorization)
+        .send({ name: "2025-2027", startDate: "2025-09-01", endDate: "2027-07-31" });
+      expect(year.status).toBe(201);
+      academicYearId = year.body.id as string;
+      const roles = await request(app).get("/api/v1/roles").set(authorization);
+      expect(roles.status).toBe(200);
+      expect(roles.body.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          name: "class_teacher",
+          permissions: expect.arrayContaining(["attendance:write"]),
+        }),
+        expect.objectContaining({
+          name: "subject_teacher",
+          permissions: expect.arrayContaining(["scores:write"]),
+        }),
+      ]));
+      const classTeacherRole = roles.body.items.find(
+        (role: { name: string }) => role.name === "class_teacher",
+      ) as { id: string } | undefined;
+      const subjectTeacherRole = roles.body.items.find(
+        (role: { name: string }) => role.name === "subject_teacher",
+      ) as { id: string } | undefined;
+      expect(classTeacherRole).toBeDefined();
+      expect(subjectTeacherRole).toBeDefined();
+
+      const term = await request(app)
+        .post(`/api/v1/academic-years/${academicYearId}/terms`)
+        .set(authorization)
+        .send({ name: "Term 1", termNumber: 1, startDate: "2025-09-01", endDate: "2025-12-19" });
+      expect(term.status).toBe(201);
+      termId = term.body.id as string;
+
+      const classroom = await request(app)
+        .post("/api/v1/classes")
+        .set(authorization)
+        .send({ academicYearId, name: "Basic 1 A", level: 1, stream: "A" });
+      expect(classroom.status).toBe(201);
+      classId = classroom.body.id as string;
+
+      const subject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "English", code: `E-${slug.slice(-8)}` });
+      expect(subject.status).toBe(201);
+      expect(subject.body.isCore).toBe(true);
+      subjectId = subject.body.id as string;
+      const englishLanguageSubject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "English Language", code: `EL-${slug.slice(-8)}` });
+      expect(englishLanguageSubject.status).toBe(201);
+      expect(englishLanguageSubject.body.isCore).toBe(true);
+      jhsSubjectIds.push(englishLanguageSubject.body.id as string);
+
+      const classSubject = await request(app)
+        .post(`/api/v1/classes/${classId}/subjects`)
+        .set(authorization)
+        .send({ subjectId });
+      expect(classSubject.status).toBe(201);
+      const mathsSubject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "Maths", code: `M-${slug.slice(-8)}` });
+      expect(mathsSubject.status).toBe(201);
+      mathsSubjectId = mathsSubject.body.id as string;
+      const mathsClassSubject = await request(app)
+        .post(`/api/v1/classes/${classId}/subjects`)
+        .set(authorization)
+        .send({ subjectId: mathsSubjectId });
+      expect(mathsClassSubject.status).toBe(201);
+      const scienceSubject = await request(app)
+        .post("/api/v1/subjects")
+        .set(authorization)
+        .send({ name: "Science", code: `S-${slug.slice(-8)}` });
+      expect(scienceSubject.status).toBe(201);
+      scienceSubjectId = scienceSubject.body.id as string;
+      const scienceClassSubject = await request(app)
+        .post(`/api/v1/classes/${classId}/subjects`)
+        .set(authorization)
+        .send({ subjectId: scienceSubjectId });
+      expect(scienceClassSubject.status).toBe(201);
+
+      const student = await request(app)
+        .post("/api/v1/students")
+        .set(authorization)
+        .send({
+          admissionNo: `ADM-${slug.slice(-8)}`,
+          firstName: "Ama",
+          lastName: "Mensah",
+          dateOfBirth: "2018-03-14",
+          gender: "female",
+        });
+      expect(student.status).toBe(201);
+      studentId = student.body.id as string;
+
+      const studentDetails = await request(app)
+        .get(`/api/v1/students/${studentId}`)
+        .set(authorization);
+      expect(studentDetails.status).toBe(200);
+      expect(studentDetails.body.dateOfBirth).toBe("2018-03-14");
+
+      const guardian = await request(app)
+        .post(`/api/v1/students/${studentId}/guardians`)
+        .set(authorization)
+        .send({ name: "Kofi Mensah", relationship: "parent", phone: "+233201234567", isPrimary: true });
+      expect(guardian.status).toBe(201);
+      const guardians = await request(app)
+        .get(`/api/v1/students/${studentId}/guardians`)
+        .set(authorization);
+      expect(guardians.status).toBe(200);
+      expect(guardians.body.items[0].phone).toBe("+233201234567");
+
+      const enrollment = await request(app)
+        .post(`/api/v1/students/${studentId}/enrollments`)
+        .set(authorization)
+        .send({ academicYearId, classId });
+      expect(enrollment.status).toBe(201);
+
+      for (const [index, firstName] of ["Kojo", "Abena", "Yaw"].entries()) {
+        const created = await request(app)
+          .post("/api/v1/students")
+          .set(authorization)
+          .send({
+            admissionNo: `ADM-${slug.slice(-6)}-${index + 2}`,
+            firstName,
+            lastName: "Mensah",
+            dateOfBirth: "2018-03-14",
+            gender: index === 1 ? "female" : "male",
+          });
+        expect(created.status).toBe(201);
+        const id = created.body.id as string;
+        additionalStudentIds.push(id);
+        const enrolled = await request(app)
+          .post(`/api/v1/students/${id}/enrollments`)
+          .set(authorization)
+          .send({ academicYearId, classId });
+        expect(enrolled.status).toBe(201);
+      }
+
+      const subjectOnlyTeacher = await request(app)
+        .post("/api/v1/users")
+        .set(authorization)
+        .send({
+          email: subjectOnlyTeacherEmail,
+          password: "Teacher-password-42!",
+          roleIds: [subjectTeacherRole!.id],
+        });
+      expect(subjectOnlyTeacher.status).toBe(201);
+      const invalidAllSubjectsAssignment = await request(app)
+        .post("/api/v1/teacher-assignments")
+        .set(authorization)
+        .send({
+          membershipId: subjectOnlyTeacher.body.membershipId,
+          classId,
+          type: "all_subjects",
+          academicYearId,
+          startDate: "2025-09-01",
+        });
+      expect(invalidAllSubjectsAssignment.status).toBe(400);
+      expect(invalidAllSubjectsAssignment.body.code).toBe(
+        "ALL_SUBJECTS_REQUIRES_TEACHER_ROLES",
+      );
+
+      const teacher = await request(app)
+        .post("/api/v1/users")
+        .set(authorization)
+        .send({
+          email: teacherEmail,
+          password: "Teacher-password-42!",
+          roleIds: [classTeacherRole!.id, subjectTeacherRole!.id],
+        });
+      expect(teacher.status).toBe(201);
+      teacherUserId = teacher.body.userId as string;
+      const assignment = await request(app)
+        .post("/api/v1/teacher-assignments")
+        .set(authorization)
+        .send({
+          membershipId: teacher.body.membershipId,
+          classId,
+          type: "all_subjects",
+          academicYearId,
+          startDate: "2025-09-01",
+        });
+      expect(assignment.status).toBe(201);
+
+      const teacherLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: teacherEmail,
+        password: "Teacher-password-42!",
+        schoolSlug: slug,
+      });
+      expect(teacherLogin.status).toBe(200);
+      const teacherAuthorization = {
+        Authorization: `Bearer ${teacherLogin.body.accessToken as string}`,
+      };
+      const teacherAssessments = await request(app)
+        .get(`/api/v1/classes/${classId}/assessments`)
+        .set(teacherAuthorization);
+      expect(teacherAssessments.status).toBe(200);
+      expect(teacherAssessments.body.items).toHaveLength(15);
+
+      const pupilIds = [studentId!, ...additionalStudentIds];
+      const englishId = subjectId!;
+      const mathsId = mathsSubjectId!;
+      const scienceId = scienceSubjectId!;
+      const scoreVectors: Record<string, Array<{
+        marks: Array<number | null>;
+        statuses?: Array<"scored" | "absent" | "excused">;
+      }>> = {
+        [englishId]: [
+          { marks: [12, 10, 14, 9, 70] },
+          {
+            marks: [15, 12, null, 10, 80],
+            statuses: ["scored", "scored", "excused", "scored", "scored"],
+          },
+          {
+            marks: [15, null, 14, 9, 70],
+            statuses: ["scored", "absent", "scored", "scored", "scored"],
+          },
+          { marks: [10, 10, 10, 10, 60] },
+        ],
+        [mathsId]: [
+          { marks: [15, 15, 15, 15, 90] },
+          { marks: [10, 10, 10, 10, 45] },
+          { marks: [6, 6, 6, 6, 33] },
+          { marks: [10, 10, 10, 10, 60] },
+        ],
+        [scienceId]: [
+          { marks: [8, 9, 10, 7, 55] },
+          { marks: [12, 12, 12, 12, 60] },
+          { marks: [5, 5, 5, 5, 40] },
+          { marks: [10, 10, 10, 10, null] },
+        ],
+      };
+      const assessmentIndexes: Record<string, number> = {
+        "Class exercise": 0,
+        "Group work": 1,
+        "Class test": 2,
+        "Project work": 3,
+        Exam: 4,
+      };
+      for (const assessment of teacherAssessments.body.items as Array<{
+        id: string;
+        subjectId: string;
+        name: string;
+      }>) {
+        const markIndex = assessmentIndexes[assessment.name];
+        expect(markIndex).toBeDefined();
+        const vectors = scoreVectors[assessment.subjectId];
+        expect(vectors).toBeDefined();
+        const items = pupilIds.flatMap((id, pupilIndex) => {
+          const vector = vectors![pupilIndex]!;
+          const mark = vector.marks[markIndex!] ?? null;
+          if (assessment.subjectId === scienceId && pupilIndex === 3 && markIndex === 4) {
+            return [];
+          }
+          const status = vector.statuses?.[markIndex!] ?? "scored";
+          return [{
+            clientId: randomUUID(),
+            studentId: id,
+            ...(mark === null ? {} : { mark }),
+            status: mark === null && status === "scored" ? "absent" : status,
+          }];
+        });
+        const saved = await request(app)
+          .put(`/api/v1/assessments/${assessment.id}/scores`)
+          .set(teacherAuthorization)
+          .send({ items });
+        expect(saved.status).toBe(200);
+      }
+
+      const computed = await request(app)
+        .post(`/api/v1/terms/${termId}/compute-results`)
+        .set(authorization)
+        .send({});
+      expect(computed.status).toBe(200);
+      const results = await request(app)
+        .get(`/api/v1/results?classId=${classId}&termId=${termId}`)
+        .set(authorization);
+      expect(results.status).toBe(200);
+      const resultFor = (pupilId: string, subjectIdForResult: string) =>
+        (results.body.items as Array<{
+          studentId: string;
+          subjectId: string;
+          total: number | string | null;
+          grades: Record<string, string>;
+          subjectPosition: number | null;
+        }>).find((row) =>
+          row.studentId === pupilId && row.subjectId === subjectIdForResult,
+        );
+      const expectResultTotal = (
+        pupilId: string,
+        subjectIdForResult: string,
+        total: number | null,
+      ) => {
+        const result = resultFor(pupilId, subjectIdForResult);
+        expect(result).toBeDefined();
+        expect(result?.total === null ? null : Number(result?.total)).toBe(total);
+      };
+      const pupilA = pupilIds[0]!;
+      const pupilB = pupilIds[1]!;
+      const pupilC = pupilIds[2]!;
+      const pupilD = pupilIds[3]!;
+      expectResultTotal(pupilA, englishId, 73);
+      expect(resultFor(pupilA, englishId)?.grades.letter).toBe("B");
+      expectResultTotal(pupilA, mathsId, 95);
+      expect(resultFor(pupilA, mathsId)?.grades.letter).toBe("A+");
+      expectResultTotal(pupilA, scienceId, 56);
+      expectResultTotal(pupilB, englishId, 81);
+      expectResultTotal(pupilB, mathsId, 56);
+      expectResultTotal(pupilB, scienceId, 70);
+      expectResultTotal(pupilC, englishId, 67);
+      expectResultTotal(pupilC, mathsId, 37);
+      expectResultTotal(pupilC, scienceId, 37);
+      expect(resultFor(pupilD, scienceId)).toMatchObject({
+        total: null,
+        subjectPosition: null,
+      });
+
+      const reportCards = await request(app)
+        .get(`/api/v1/terms/${termId}/report-cards?classId=${classId}`)
+        .set(authorization);
+      expect(reportCards.status).toBe(200);
+      const reportCardFor = (studentName: string) =>
+        (reportCards.body.items as Array<{
+          studentName: string;
+          aggregate: number | null;
+          average: number | null;
+          overallPosition: string | null;
+        }>).find((item) => item.studentName === studentName);
+      expect(reportCardFor("Ama Mensah")).toMatchObject({
+        aggregate: 224,
+        average: 75,
+        overallPosition: "1st",
+      });
+      expect(reportCardFor("Kojo Mensah")).toMatchObject({
+        aggregate: 207,
+        overallPosition: "2nd",
+      });
+      expect(reportCardFor("Abena Mensah")).toMatchObject({
+        aggregate: 141,
+        overallPosition: "3rd",
+      });
+      expect(reportCardFor("Yaw Mensah")).toMatchObject({
+        aggregate: null,
+        overallPosition: null,
+      });
+
+      const jhsTerm = await request(app)
+        .post(`/api/v1/academic-years/${academicYearId}/terms`)
+        .set(authorization)
+        .send({ name: "Term 2", termNumber: 2, startDate: "2026-01-05", endDate: "2026-04-10" });
+      expect(jhsTerm.status).toBe(201);
+      jhsTermId = jhsTerm.body.id as string;
+      const jhsClass = await request(app)
+        .post("/api/v1/classes")
+        .set(authorization)
+        .send({ academicYearId, name: "Basic 7 A", level: 7, stream: "A" });
+      expect(jhsClass.status).toBe(201);
+      jhsClassId = jhsClass.body.id as string;
+      const jhsPupil = await request(app)
+        .post("/api/v1/students")
+        .set(authorization)
+        .send({
+          admissionNo: `JHS-${slug.slice(-8)}`,
+          firstName: "Esi",
+          lastName: "JHS",
+          dateOfBirth: "2013-03-14",
+          gender: "female",
+        });
+      expect(jhsPupil.status).toBe(201);
+      jhsStudentId = jhsPupil.body.id as string;
+      const jhsEnrollment = await request(app)
+        .post(`/api/v1/students/${jhsStudentId}/enrollments`)
+        .set(authorization)
+        .send({ academicYearId, classId: jhsClassId });
+      expect(jhsEnrollment.status).toBe(201);
+
+      const jhsSubjectNames = [
+        "English",
+        "Mathematics",
+        "Integrated Science",
+        "Social Studies",
+        "French",
+        "Art",
+        "ICT",
+      ];
+      const jhsSubjects: Array<{ id: string; name: string; isCore: boolean }> = [];
+      for (const [index, name] of jhsSubjectNames.entries()) {
+        let id: string;
+        if (name === "English") {
+          id = subjectId!;
+        } else {
+          const createdSubject = await request(app)
+            .post("/api/v1/subjects")
+            .set(authorization)
+            .send({ name, code: `J${index}-${slug.slice(-8)}` });
+          expect(createdSubject.status).toBe(201);
+          expect(createdSubject.body.isCore).toBe(index < 4);
+          id = createdSubject.body.id as string;
+          jhsSubjectIds.push(id);
+        }
+        jhsSubjects.push({ id, name, isCore: index < 4 });
+        const assignedSubject = await request(app)
+          .post(`/api/v1/classes/${jhsClassId}/subjects`)
+          .set(authorization)
+          .send({ subjectId: id });
+        expect(assignedSubject.status).toBe(201);
+      }
+      const changedCoreFlag = await request(app)
+        .patch(`/api/v1/subjects/${jhsSubjects[0]!.id}`)
+        .set(authorization)
+        .send({ isCore: false });
+      expect(changedCoreFlag.status).toBe(200);
+      expect(changedCoreFlag.body.isCore).toBe(false);
+      const readinessWithFewerCoreSubjects = await request(app)
+        .get(`/api/v1/terms/${jhsTermId}/readiness?classId=${jhsClassId}`)
+        .set(authorization);
+      expect(readinessWithFewerCoreSubjects.status).toBe(200);
+      expect(readinessWithFewerCoreSubjects.body.classes[0].warnings).toContainEqual(
+        expect.objectContaining({ code: "FEWER_THAN_FOUR_CORE_SUBJECTS" }),
+      );
+      const restoredCoreFlag = await request(app)
+        .patch(`/api/v1/subjects/${jhsSubjects[0]!.id}`)
+        .set(authorization)
+        .send({ isCore: true });
+      expect(restoredCoreFlag.status).toBe(200);
+
+      const jhsAssessments = await request(app)
+        .get(`/api/v1/classes/${jhsClassId}/assessments`)
+        .set(authorization);
+      expect(jhsAssessments.status).toBe(200);
+      const examPercentBySubject: Record<string, number> = {
+        English: 20,
+        Mathematics: 30,
+        "Integrated Science": 40,
+        "Social Studies": 0,
+        French: 100,
+        Art: 90,
+        ICT: 80,
+      };
+      for (const assessment of jhsAssessments.body.items as Array<{
+        id: string;
+        subjectName: string;
+        component: string | null;
+        maxMark: string;
+      }>) {
+        const maxMark = Number(assessment.maxMark);
+        const mark = assessment.component === "exam"
+          ? Math.round(maxMark * examPercentBySubject[assessment.subjectName]! * 10 / 100) / 10
+          : maxMark;
+        const saved = await request(app)
+          .put(`/api/v1/assessments/${assessment.id}/scores`)
+          .set(authorization)
+          .send({
+            items: [{
+              clientId: randomUUID(),
+              studentId: jhsStudentId,
+              mark,
+              status: "scored",
+            }],
+          });
+        expect(saved.status).toBe(200);
+      }
+      const jhsComputed = await request(app)
+        .post(`/api/v1/terms/${jhsTermId}/compute-results`)
+        .set(authorization)
+        .send({});
+      expect(jhsComputed.status).toBe(200);
+      const jhsResults = await request(app)
+        .get(`/api/v1/results?classId=${jhsClassId}&termId=${jhsTermId}`)
+        .set(authorization);
+      expect(jhsResults.status).toBe(200);
+      const jhsResultRows = jhsResults.body.items as Array<{
+        subjectId: string;
+        total: number | string | null;
+      }>;
+      const totalsBySubject = new Map(
+        jhsResultRows.map((row) => [row.subjectId, row.total === null ? null : Number(row.total)]),
+      );
+      const selectedSubjects = [
+        ...jhsSubjects.filter((subject) => subject.isCore),
+        ...jhsSubjects
+          .filter((subject) => !subject.isCore)
+          .sort((a, b) => (totalsBySubject.get(b.id) ?? -1) - (totalsBySubject.get(a.id) ?? -1))
+          .slice(0, 2),
+      ];
+      const expectedAggregate = selectedSubjects.reduce(
+        (sum, subject) => sum + (totalsBySubject.get(subject.id) ?? 0),
+        0,
+      );
+      const jhsReportCards = await request(app)
+        .get(`/api/v1/terms/${jhsTermId}/report-cards?classId=${jhsClassId}`)
+        .set(authorization);
+      expect(jhsReportCards.status).toBe(200);
+      const jhsReportCard = (jhsReportCards.body.items as Array<{
+        studentName: string;
+        aggregate: number;
+        aggregateSubjects: Array<{ subjectId: string }>;
+        subjects: Array<{ subjectId: string; countedTowardAggregate: boolean }>;
+      }>).find((item) => item.studentName === "Esi JHS");
+      expect(jhsReportCard).toBeDefined();
+      expect(jhsReportCard?.aggregate).toBe(expectedAggregate);
+      expect(jhsReportCard?.aggregateSubjects.map((subject) => subject.subjectId).sort())
+        .toEqual(selectedSubjects.map((subject) => subject.id).sort());
+      expect(jhsReportCard?.subjects.filter((subject) => subject.countedTowardAggregate))
+        .toHaveLength(6);
+
+      const jhsBroadsheet = await request(app)
+        .get(`/api/v1/classes/${jhsClassId}/broadsheet?termId=${jhsTermId}`)
+        .set(authorization);
+      expect(jhsBroadsheet.status).toBe(200);
+      expect(jhsBroadsheet.body.items[0].aggregateSubjects.map(
+        (subject: { subjectId: string }) => subject.subjectId,
+      ).sort()).toEqual(selectedSubjects.map((subject) => subject.id).sort());
+      expect(jhsBroadsheet.body.items[0].subjects.filter(
+        (subject: { countedTowardAggregate: boolean }) => subject.countedTowardAggregate,
+      )).toHaveLength(6);
+
+      const locked = await request(app)
+        .post(`/api/v1/terms/${termId}/lock`)
+        .set(authorization)
+        .send({});
+      expect(locked.status).toBe(200);
+      const lockedAssessment = (teacherAssessments.body.items as Array<{ id: string }>)[0]!;
+      const lockedWrite = await request(app)
+        .put(`/api/v1/assessments/${lockedAssessment.id}/scores`)
+        .set(teacherAuthorization)
+        .send({
+          items: [{
+            clientId: randomUUID(),
+            studentId: pupilA,
+            mark: 11,
+            status: "scored",
+          }],
+        });
+      expect(lockedWrite.status).toBe(409);
+      expect(lockedWrite.body.items).toMatchObject([
+        { outcome: "rejected", reason: "TERM_LOCKED" },
+      ]);
     } finally {
       if (schoolId) {
         await inMigrationSchool(schoolId, async (client) => {
+          const allClassIds = [classId, jhsClassId].filter((id): id is string => id !== undefined);
+          const allTermIds = [termId, jhsTermId].filter((id): id is string => id !== undefined);
           await client.query("DELETE FROM audit_log WHERE school_id = $1", [schoolId]);
+          await client.query(
+            `DELETE FROM score_versions WHERE score_id IN (
+              SELECT id FROM scores WHERE assessment_id IN (
+                SELECT id FROM assessments WHERE class_id = ANY($1::uuid[])
+              )
+            )`,
+            [allClassIds],
+          );
+          await client.query(
+            `DELETE FROM scores WHERE assessment_id IN (
+              SELECT id FROM assessments WHERE class_id = ANY($1::uuid[])
+            )`,
+            [allClassIds],
+          );
+          if (allTermIds.length > 0) {
+            await client.query("DELETE FROM term_summaries WHERE term_id = ANY($1::uuid[])", [allTermIds]);
+            await client.query("DELETE FROM term_results WHERE term_id = ANY($1::uuid[])", [allTermIds]);
+            await client.query("DELETE FROM term_attendance WHERE term_id = ANY($1::uuid[])", [allTermIds]);
+          }
+          if (allClassIds.length > 0) {
+            await client.query("DELETE FROM teacher_assignments WHERE class_id = ANY($1::uuid[])", [allClassIds]);
+          }
+          if (studentId) {
+            await client.query("DELETE FROM guardians WHERE student_id = $1", [studentId]);
+          }
+          if (additionalStudentIds.length > 0) {
+            await client.query(
+              "DELETE FROM guardians WHERE student_id = ANY($1::uuid[])",
+              [additionalStudentIds],
+            );
+          }
+          const allStudentIds = [studentId, jhsStudentId, ...additionalStudentIds].filter(
+            (id): id is string => id !== undefined,
+          );
+          await client.query("DELETE FROM enrollments WHERE student_id = ANY($1::uuid[])", [allStudentIds]);
+          await client.query("DELETE FROM students WHERE id = ANY($1::uuid[])", [allStudentIds]);
+          if (allClassIds.length > 0) {
+            await client.query("DELETE FROM assessments WHERE class_id = ANY($1::uuid[])", [allClassIds]);
+            await client.query("DELETE FROM class_subjects WHERE class_id = ANY($1::uuid[])", [allClassIds]);
+          }
+          if (allTermIds.length > 0) {
+            await client.query("DELETE FROM terms WHERE id = ANY($1::uuid[])", [allTermIds]);
+          }
+          if (allClassIds.length > 0) {
+            await client.query("DELETE FROM classes WHERE id = ANY($1::uuid[])", [allClassIds]);
+          }
+          const allSubjectIds = [subjectId, mathsSubjectId, scienceSubjectId, ...jhsSubjectIds].filter(
+            (id): id is string => id !== undefined,
+          );
+          await client.query("DELETE FROM subjects WHERE id = ANY($1::uuid[])", [allSubjectIds]);
+          if (academicYearId) {
+            await client.query("DELETE FROM academic_years WHERE id = $1", [academicYearId]);
+          }
+          if (teacherUserId) {
+            await client.query("DELETE FROM memberships WHERE user_id = $1", [teacherUserId]);
+          }
+          await client.query("DELETE FROM grade_bands WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM grading_scheme_overrides WHERE school_id = $1", [schoolId]);
+          await client.query("DELETE FROM grading_schemes WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM membership_roles WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM role_permissions WHERE school_id = $1", [schoolId]);
           await client.query("DELETE FROM roles WHERE school_id = $1", [schoolId]);
@@ -694,8 +1429,38 @@ describe("Phase 1 tenant isolation", () => {
           "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
           [email],
         );
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+          [teacherEmail],
+        );
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE user_id = (SELECT id FROM users WHERE email = $1)",
+          [subjectOnlyTeacherEmail],
+        );
         await migrationPool.query("DELETE FROM users WHERE email = $1", [email]);
+        await migrationPool.query("DELETE FROM users WHERE email = $1", [teacherEmail]);
+        await migrationPool.query("DELETE FROM users WHERE email = $1", [subjectOnlyTeacherEmail]);
         await migrationPool.query("DELETE FROM schools WHERE id = $1", [schoolId]);
+      }
+      if (platformRefreshTokenHash) {
+        await migrationPool.query(
+          "DELETE FROM refresh_tokens WHERE token_hash = $1",
+          [platformRefreshTokenHash],
+        );
+      }
+      if (platformAdminUserId) {
+        if (previousPlatformAdmin) {
+          await migrationPool.query(
+            "UPDATE users SET password_hash = $1, status = $2 WHERE id = $3",
+            [
+              previousPlatformAdmin.password_hash,
+              previousPlatformAdmin.status,
+              platformAdminUserId,
+            ],
+          );
+        } else {
+          await migrationPool.query("DELETE FROM users WHERE id = $1", [platformAdminUserId]);
+        }
       }
     }
   });

@@ -16,6 +16,10 @@ import type { ResourceReference } from "../shared/rbac/can";
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const idSchema = z.string().uuid();
+const limitOffsetSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(1000000).default(0),
+});
 const yearSchema = z.object({
   name: z.string().trim().min(2).max(80),
   startDate: dateSchema,
@@ -681,13 +685,32 @@ academicsRoutes.post("/students", ...route("students:write", async (request, res
 }));
 
 academicsRoutes.get("/students", ...route("students:read", async (request, response) => {
-  const query = z.object({ q: z.string().trim().max(120).optional(), classId: idSchema.optional() }).safeParse(request.query);
+  const query = z.object({
+    q: z.string().trim().max(120).optional(),
+    classId: idSchema.optional(),
+    limit: limitOffsetSchema.shape.limit,
+    offset: limitOffsetSchema.shape.offset,
+  }).strict().safeParse(request.query);
   if (!query.success) throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", query.error.issues);
   const { tx } = context(request);
+  const { schoolId } = actor(request);
   if (query.data.classId) {
     const classExists = await sql`SELECT id FROM classes WHERE id = ${query.data.classId}::uuid`.execute(tx);
     if (!classExists.rows[0]) throw new HttpError(404, "NOT_FOUND", "Class not found");
   }
+  const total = await sql<{ total: number }>`
+    SELECT count(DISTINCT st.id)::int AS total
+    FROM students st
+    LEFT JOIN enrollments e
+      ON e.school_id = st.school_id AND e.student_id = st.id AND e.status = 'active'
+    WHERE st.school_id = ${schoolId}::uuid
+      AND (${query.data.q ?? null}::text IS NULL OR
+        st.admission_no ILIKE '%' || ${query.data.q ?? ""} || '%' OR
+        st.first_name ILIKE '%' || ${query.data.q ?? ""} || '%' OR
+        st.last_name ILIKE '%' || ${query.data.q ?? ""} || '%')
+      AND (${query.data.classId ?? null}::uuid IS NULL
+        OR e.class_id = ${query.data.classId ?? null}::uuid)
+  `.execute(tx);
   const rows = await sql`
     SELECT DISTINCT st.id, st.admission_no AS "admissionNo", st.first_name AS "firstName",
       st.last_name AS "lastName", st.other_names AS "otherNames", st.gender, st.status
@@ -698,9 +721,18 @@ academicsRoutes.get("/students", ...route("students:read", async (request, respo
       st.first_name ILIKE '%' || ${query.data.q ?? ""} || '%' OR
       st.last_name ILIKE '%' || ${query.data.q ?? ""} || '%')
       AND (${query.data.classId ?? null}::uuid IS NULL OR e.class_id = ${query.data.classId ?? null}::uuid)
-    ORDER BY st.last_name, st.first_name LIMIT 200
+    ORDER BY st.last_name, st.first_name, st.id
+    LIMIT ${query.data.limit + 1} OFFSET ${query.data.offset}
   `.execute(tx);
-  response.json({ items: rows.rows });
+  const hasMore = rows.rows.length > query.data.limit;
+  response.json({
+    items: rows.rows.slice(0, query.data.limit),
+    limit: query.data.limit,
+    offset: query.data.offset,
+    totalCount: total.rows[0]!.total,
+    hasMore,
+    nextOffset: hasMore ? query.data.offset + query.data.limit : null,
+  });
 }, (request) => {
   const classId = typeof request.query.classId === "string" ? request.query.classId : undefined;
   const schoolId = (request as RequestWithTenant).tenantContext.claims.schoolId!;
@@ -794,9 +826,23 @@ academicsRoutes.post("/students/:id/enrollments", ...route("students:write", asy
 }));
 
 academicsRoutes.get("/enrollments", ...route("students:read", async (request, response) => {
-  const filters = z.object({ academicYearId: idSchema.optional(), classId: idSchema.optional() }).safeParse(request.query);
+  const filters = z.object({
+    academicYearId: idSchema.optional(),
+    classId: idSchema.optional(),
+    limit: limitOffsetSchema.shape.limit,
+    offset: limitOffsetSchema.shape.offset,
+  }).strict().safeParse(request.query);
   if (!filters.success) throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", filters.error.issues);
   const { tx } = context(request);
+  const { schoolId } = actor(request);
+  const total = await sql<{ total: number }>`
+    SELECT count(*)::int AS total FROM enrollments e
+    WHERE e.school_id = ${schoolId}::uuid
+      AND (${filters.data.academicYearId ?? null}::uuid IS NULL
+        OR e.academic_year_id = ${filters.data.academicYearId ?? null}::uuid)
+      AND (${filters.data.classId ?? null}::uuid IS NULL
+        OR e.class_id = ${filters.data.classId ?? null}::uuid)
+  `.execute(tx);
   const rows = await sql`
     SELECT e.id, e.student_id AS "studentId", e.class_id AS "classId",
       e.academic_year_id AS "academicYearId", e.roll_number AS "rollNumber",
@@ -804,9 +850,24 @@ academicsRoutes.get("/enrollments", ...route("students:read", async (request, re
     FROM enrollments e
     WHERE (${filters.data.academicYearId ?? null}::uuid IS NULL OR e.academic_year_id = ${filters.data.academicYearId ?? null}::uuid)
       AND (${filters.data.classId ?? null}::uuid IS NULL OR e.class_id = ${filters.data.classId ?? null}::uuid)
-    ORDER BY e.created_at DESC
+    ORDER BY e.created_at DESC, e.id DESC
+    LIMIT ${filters.data.limit + 1} OFFSET ${filters.data.offset}
   `.execute(tx);
-  response.json({ items: rows.rows });
+  const hasMore = rows.rows.length > filters.data.limit;
+  response.json({
+    items: rows.rows.slice(0, filters.data.limit),
+    limit: filters.data.limit,
+    offset: filters.data.offset,
+    totalCount: total.rows[0]!.total,
+    hasMore,
+    nextOffset: hasMore ? filters.data.offset + filters.data.limit : null,
+  });
+}, (request) => {
+  const classId = typeof request.query.classId === "string" ? request.query.classId : undefined;
+  const schoolId = (request as RequestWithTenant).tenantContext.claims.schoolId!;
+  return classId
+    ? { type: "class", id: classId }
+    : { type: "student_directory", id: schoolId };
 }));
 
 academicsRoutes.post("/enrollments/promote-class", ...route("students:write", async (request, response) => {

@@ -9,10 +9,13 @@ import { HttpError } from "../shared/errors/http-error";
 
 const paginationSchema = z
   .object({
-    page: z.coerce.number().int().min(1).max(10000).default(1),
+    page: z.coerce.number().int().min(1).max(10000).optional(),
     limit: z.coerce.number().int().min(1).max(100).default(50),
-  })
-  .strict();
+    offset: z.coerce.number().int().min(0).max(1000000).optional(),
+  }).strict().refine(
+    (value) => value.page === undefined || value.offset === undefined,
+    { message: "Use either page or offset, not both" },
+  );
 
 export const auditRoutes = Router();
 
@@ -30,7 +33,9 @@ auditRoutes.get(
         parsed.error.issues,
       );
     }
-    const { page, limit } = parsed.data;
+    const { limit } = parsed.data;
+    const offset = parsed.data.offset ?? ((parsed.data.page ?? 1) - 1) * limit;
+    const page = parsed.data.page ?? Math.floor(offset / limit) + 1;
     const { tx, claims } = (request as RequestWithTenant).tenantContext;
     const rows = await sql<{
       id: string;
@@ -46,14 +51,16 @@ auditRoutes.get(
     FROM audit_log
     WHERE school_id = ${claims.schoolId!}::uuid
     ORDER BY created_at DESC, id DESC
-    LIMIT ${limit + 1} OFFSET ${(page - 1) * limit}
+    LIMIT ${limit + 1} OFFSET ${offset}
   `.execute(tx);
     const hasMore = rows.rows.length > limit;
     response.json({
       items: rows.rows.slice(0, limit),
       page,
       limit,
+      offset,
       nextPage: hasMore ? page + 1 : null,
+      nextOffset: hasMore ? offset + limit : null,
     });
   }),
 );

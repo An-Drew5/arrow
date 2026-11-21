@@ -1235,6 +1235,53 @@ describe("Phase 1 tenant isolation", () => {
       expect(teacherAssessments.body.items).toHaveLength(15);
 
       const pupilIds = [studentId!, ...additionalStudentIds];
+      const studentPage = await request(app)
+        .get(`/api/v1/students?classId=${classId}&limit=2&offset=0`)
+        .set(authorization);
+      expect(studentPage.status).toBe(200);
+      expect(studentPage.body).toMatchObject({
+        limit: 2,
+        offset: 0,
+        totalCount: 4,
+        hasMore: true,
+        nextOffset: 2,
+      });
+      const secondStudentPage = await request(app)
+        .get(`/api/v1/students?classId=${classId}&limit=2&offset=2`)
+        .set(authorization);
+      expect(secondStudentPage.status).toBe(200);
+      expect(secondStudentPage.body.items).toHaveLength(2);
+      expect(studentPage.body.items.map((row: { id: string }) => row.id))
+        .not.toEqual(secondStudentPage.body.items.map((row: { id: string }) => row.id));
+
+      const enrollmentPage = await request(app)
+        .get(`/api/v1/enrollments?academicYearId=${academicYearId}&classId=${classId}&limit=2&offset=0`)
+        .set(authorization);
+      expect(enrollmentPage.status).toBe(200);
+      expect(enrollmentPage.body).toMatchObject({
+        limit: 2,
+        offset: 0,
+        totalCount: 4,
+        hasMore: true,
+        nextOffset: 2,
+      });
+      const secondEnrollmentPage = await request(app)
+        .get(`/api/v1/enrollments?academicYearId=${academicYearId}&classId=${classId}&limit=2&offset=2`)
+        .set(authorization);
+      expect(secondEnrollmentPage.status).toBe(200);
+      expect(secondEnrollmentPage.body.items).toHaveLength(2);
+
+      const firstAuditPage = await request(app)
+        .get("/api/v1/audit-log?limit=1&offset=0")
+        .set(authorization);
+      expect(firstAuditPage.status).toBe(200);
+      expect(firstAuditPage.body.nextOffset).toBe(1);
+      const secondAuditPage = await request(app)
+        .get("/api/v1/audit-log?limit=1&offset=1")
+        .set(authorization);
+      expect(secondAuditPage.status).toBe(200);
+      expect(secondAuditPage.body.items[0].id).not.toBe(firstAuditPage.body.items[0].id);
+
       const attendanceDate = "2025-11-15";
       const attendanceStatuses = ["present", "late", "absent", "excused"] as const;
       const attendanceRegister = await request(app)

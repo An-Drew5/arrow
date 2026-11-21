@@ -322,6 +322,10 @@ async function createFixtures(): Promise<void> {
       [fixture.schoolA, fixture.roleA, "audit:read"],
     );
     await client.query(
+      "INSERT INTO role_permissions (school_id, role_id, permission) VALUES ($1, $2, $3)",
+      [fixture.schoolA, fixture.roleA, "users:read"],
+    );
+    await client.query(
       "INSERT INTO membership_roles (school_id, membership_id, role_id) VALUES ($1, $2, $3)",
       [fixture.schoolA, fixture.membershipA, fixture.roleA],
     );
@@ -637,6 +641,13 @@ describe("Phase 1 tenant isolation", () => {
     expect(audit.body.items.map((row: { id: string }) => row.id)).not.toContain(
       fixture.auditB,
     );
+
+    const users = await request(app).get("/api/v1/users").set(authorization());
+    expect(users.status).toBe(200);
+    expect(users.body.items.map((row: { membershipId: string }) => row.membershipId))
+      .toContain(fixture.membershipA);
+    expect(users.body.items.map((row: { membershipId: string }) => row.membershipId))
+      .not.toContain(fixture.membershipB);
   });
 
   it("audits a denied users:manage permission check", async () => {
@@ -840,6 +851,57 @@ describe("Phase 1 tenant isolation", () => {
       ) as { id: string } | undefined;
       expect(classTeacherRole).toBeDefined();
       expect(subjectTeacherRole).toBeDefined();
+
+      const newStaff = await request(app)
+        .post("/api/v1/users")
+        .set(authorization)
+        .send({
+          name: "Staff User",
+          email: `staff-${randomUUID()}@example.test`,
+          password,
+          roleIds: [classTeacherRole!.id],
+        });
+      expect(newStaff.status).toBe(201);
+      const staffList = await request(app).get("/api/v1/users").set(authorization);
+      expect(staffList.status).toBe(200);
+      const listedStaff = staffList.body.items.find(
+        (item: { membershipId: string }) => item.membershipId === newStaff.body.membershipId,
+      );
+      expect(listedStaff).toMatchObject({
+        name: "Staff User",
+        status: "active",
+        roles: ["class_teacher"],
+      });
+      const disabledStaff = await request(app)
+        .patch(`/api/v1/users/${newStaff.body.membershipId}`)
+        .set(authorization)
+        .send({ status: "disabled" });
+      expect(disabledStaff.status).toBe(200);
+      const updatedStaff = await request(app)
+        .patch(`/api/v1/users/${newStaff.body.membershipId}`)
+        .set(authorization)
+        .send({ status: "active", roleIds: [subjectTeacherRole!.id] });
+      expect(updatedStaff.status).toBe(200);
+      const listedUpdatedStaff = (await request(app)
+        .get("/api/v1/users")
+        .set(authorization)).body.items.find(
+          (item: { membershipId: string }) => item.membershipId === newStaff.body.membershipId,
+        );
+      expect(listedUpdatedStaff).toMatchObject({
+        status: "active",
+        roles: ["subject_teacher"],
+      });
+
+      const selfMember = staffList.body.items.find(
+        (item: { email: string }) => item.email === email,
+      );
+      expect(selfMember).toBeDefined();
+      const removeOwnAdminRole = await request(app)
+        .patch(`/api/v1/users/${selfMember.membershipId}`)
+        .set(authorization)
+        .send({ roleIds: [classTeacherRole!.id] });
+      expect(removeOwnAdminRole.status).toBe(409);
+      expect(removeOwnAdminRole.body.code).toBe("LAST_SCHOOL_ADMIN");
 
       const term = await request(app)
         .post(`/api/v1/academic-years/${academicYearId}/terms`)

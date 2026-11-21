@@ -1072,6 +1072,19 @@ describe("Phase 1 tenant isolation", () => {
       const teacherAuthorization = {
         Authorization: `Bearer ${teacherLogin.body.accessToken as string}`,
       };
+      const teacherAssignments = await request(app)
+        .get("/api/v1/me/assignments")
+        .set(teacherAuthorization);
+      expect(teacherAssignments.status).toBe(200);
+      expect(teacherAssignments.body.openTermId).toBe(termId);
+      expect(teacherAssignments.body.items).toEqual([
+        expect.objectContaining({
+          class: { id: classId, name: "Basic 1 A" },
+          subject: null,
+          allSubjects: true,
+          academicYear: { id: academicYearId, name: "2025-2027" },
+        }),
+      ]);
       const teacherAssessments = await request(app)
         .get(`/api/v1/classes/${classId}/assessments`)
         .set(teacherAuthorization);

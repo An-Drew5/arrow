@@ -23,6 +23,67 @@ const assignmentSchema = z.object({
 export const teacherRoutes = Router();
 teacherRoutes.use(tenantContext);
 
+teacherRoutes.get(
+  "/me/assignments",
+  asyncHandler(async (request, response) => {
+    const { tx, claims } = (request as RequestWithTenant).tenantContext;
+    const assignments = await sql<{
+      id: string;
+      class_id: string;
+      class_name: string;
+      subject_id: string | null;
+      subject_name: string | null;
+      academic_year_id: string;
+      academic_year_name: string;
+      assignment_type: string;
+    }>`
+      SELECT ta.id, c.id AS class_id, c.name AS class_name,
+        s.id AS subject_id, s.name AS subject_name,
+        ay.id AS academic_year_id, ay.name AS academic_year_name,
+        ta.assignment_type
+      FROM teacher_assignments ta
+      JOIN memberships m
+        ON m.school_id = ta.school_id AND m.id = ta.membership_id
+      JOIN classes c
+        ON c.school_id = ta.school_id AND c.id = ta.class_id
+      JOIN academic_years ay
+        ON ay.school_id = ta.school_id AND ay.id = ta.academic_year_id
+      LEFT JOIN subjects s
+        ON s.school_id = ta.school_id AND s.id = ta.subject_id
+      WHERE ta.school_id = ${claims.schoolId!}::uuid
+        AND ta.membership_id = ${claims.membershipId!}::uuid
+        AND m.status = 'active' AND ay.status = 'open'
+        AND ta.start_date <= CURRENT_DATE
+        AND (ta.end_date IS NULL OR ta.end_date >= CURRENT_DATE)
+      ORDER BY c.name, s.name NULLS FIRST, ta.id
+    `.execute(tx);
+    const openTerm = await sql<{ id: string }>`
+      SELECT t.id
+      FROM terms t
+      JOIN academic_years ay
+        ON ay.school_id = t.school_id AND ay.id = t.academic_year_id
+      WHERE t.school_id = ${claims.schoolId!}::uuid
+        AND t.status = 'open' AND ay.status = 'open'
+      ORDER BY
+        (CURRENT_DATE BETWEEN t.start_date AND t.end_date) DESC,
+        t.term_number DESC
+      LIMIT 1
+    `.execute(tx);
+    response.json({
+      items: assignments.rows.map((row) => ({
+        id: row.id,
+        class: { id: row.class_id, name: row.class_name },
+        subject: row.assignment_type === "subject" && row.subject_id
+          ? { id: row.subject_id, name: row.subject_name }
+          : null,
+        allSubjects: row.assignment_type === "all_subjects",
+        academicYear: { id: row.academic_year_id, name: row.academic_year_name },
+      })),
+      openTermId: openTerm.rows[0]?.id ?? null,
+    });
+  }),
+);
+
 teacherRoutes.post(
   "/teacher-assignments",
   requirePermission("academics:manage"),

@@ -1191,6 +1191,31 @@ describe("Phase 1 tenant isolation", () => {
         expect(saved.status).toBe(200);
       }
 
+      const progress = await request(app)
+        .get(`/api/v1/terms/${termId}/progress`)
+        .set(authorization);
+      expect(progress.status).toBe(200);
+      expect(progress.body.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          classId,
+          subjectId: englishId,
+          entered: 20,
+          expected: 20,
+        }),
+        expect.objectContaining({
+          classId,
+          subjectId: mathsId,
+          entered: 20,
+          expected: 20,
+        }),
+        expect.objectContaining({
+          classId,
+          subjectId: scienceId,
+          entered: 19,
+          expected: 20,
+        }),
+      ]));
+
       const computed = await request(app)
         .post(`/api/v1/terms/${termId}/compute-results`)
         .set(authorization)

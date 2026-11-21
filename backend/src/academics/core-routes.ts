@@ -932,6 +932,98 @@ academicCoreRoutes.get(
 );
 
 academicCoreRoutes.get(
+  "/terms/:id/progress",
+  asyncHandler(async (request, response) => {
+    const termId = idSchema.safeParse(request.params.id);
+    if (!termId.success) {
+      throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", termId.error.issues);
+    }
+    const currentActor = actor(request as RequestWithTenant);
+    const { tx } = context(request as RequestWithTenant);
+    await requireScope(request as RequestWithTenant, "results:compute");
+    const term = await sql<{ id: string; academic_year_id: string }>`
+      SELECT id, academic_year_id FROM terms
+      WHERE school_id = ${currentActor.schoolId}::uuid AND id = ${termId.data}::uuid
+    `.execute(tx);
+    if (!term.rows[0]) throw new HttpError(404, "NOT_FOUND", "Term not found");
+
+    const progress = await sql<{
+      class_id: string;
+      class_name: string;
+      subject_id: string;
+      subject_name: string;
+      entered: number;
+      expected: number;
+    }>`
+      WITH active_components AS (
+        SELECT c.id AS class_id, c.name AS class_name,
+          cs.id AS class_subject_id, cs.subject_id, sub.name AS subject_name,
+          component.id AS component_id
+        FROM classes c
+        JOIN class_subjects cs
+          ON cs.school_id = c.school_id AND cs.class_id = c.id
+        JOIN subjects sub
+          ON sub.school_id = cs.school_id AND sub.id = cs.subject_id
+        JOIN LATERAL (
+          SELECT gs.id FROM grading_schemes gs
+          WHERE gs.school_id = c.school_id AND gs.is_default
+            AND c.level BETWEEN gs.level_from AND gs.level_to
+          ORDER BY CASE WHEN gs.name IN ('Primary scheme', 'JHS scheme') THEN 0 ELSE 1 END,
+            gs.created_at DESC
+          LIMIT 1
+        ) scheme ON TRUE
+        JOIN scheme_components component
+          ON component.school_id = c.school_id
+          AND component.scheme_id = scheme.id AND component.is_active
+        WHERE c.school_id = ${currentActor.schoolId}::uuid
+          AND c.academic_year_id = ${term.rows[0]!.academic_year_id}::uuid
+      )
+      SELECT component.class_id, component.class_name,
+        component.subject_id, component.subject_name,
+        count(DISTINCT (component.component_id, e.student_id))
+          FILTER (WHERE e.student_id IS NOT NULL)::int AS expected,
+        count(DISTINCT (component.component_id, score.student_id))
+          FILTER (WHERE score.student_id IS NOT NULL)::int AS entered
+      FROM active_components component
+      LEFT JOIN enrollments e
+        ON e.school_id = ${currentActor.schoolId}::uuid
+        AND e.class_id = component.class_id
+        AND e.academic_year_id = ${term.rows[0]!.academic_year_id}::uuid
+        AND e.status = 'active'
+        AND NOT EXISTS (
+          SELECT 1 FROM student_subject_opt_outs optout
+          WHERE optout.school_id = ${currentActor.schoolId}::uuid
+            AND optout.student_id = e.student_id
+            AND optout.class_subject_id = component.class_subject_id
+        )
+      LEFT JOIN assessments a
+        ON a.school_id = ${currentActor.schoolId}::uuid
+        AND a.term_id = ${term.rows[0]!.id}::uuid
+        AND a.class_id = component.class_id
+        AND a.subject_id = component.subject_id
+        AND a.scheme_component_id = component.component_id
+      LEFT JOIN scores score
+        ON score.school_id = a.school_id AND score.assessment_id = a.id
+        AND score.student_id = e.student_id
+      GROUP BY component.class_id, component.class_name,
+        component.subject_id, component.subject_name
+      ORDER BY component.class_name, component.subject_name
+    `.execute(tx);
+    response.json({
+      termId: term.rows[0].id,
+      items: progress.rows.map((row) => ({
+        classId: row.class_id,
+        className: row.class_name,
+        subjectId: row.subject_id,
+        subjectName: row.subject_name,
+        entered: row.entered,
+        expected: row.expected,
+      })),
+    });
+  }),
+);
+
+academicCoreRoutes.get(
   "/terms/:id/readiness",
   asyncHandler(async (request, response) => {
     const termId = idSchema.safeParse(request.params.id);

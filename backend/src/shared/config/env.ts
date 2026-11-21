@@ -15,6 +15,18 @@ const environmentSchema = z.object({
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   PLATFORM_ADMIN_EMAIL: z.string().email(),
   PLATFORM_ADMIN_PASSWORD: z.string().min(12).optional(),
+  CORS_ALLOWED_ORIGINS: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((origin) => origin.trim()).filter(Boolean))
+    .refine((origins) => origins.every((origin) => {
+      try {
+        const parsed = new URL(origin);
+        return parsed.origin === origin && parsed.username === "" && parsed.password === "";
+      } catch {
+        return false;
+      }
+    }), "CORS_ALLOWED_ORIGINS must be a comma-separated list of origins"),
 });
 
 export const env = environmentSchema.parse(process.env);

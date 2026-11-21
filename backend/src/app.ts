@@ -11,13 +11,16 @@ import { peopleRoutes } from "./people/routes";
 import { db } from "./shared/db/database";
 import { errorHandler } from "./shared/middleware/errors";
 import { setResourceScopeRule } from "./shared/rbac/can";
+import { cors } from "./shared/middleware/cors";
 import { redis } from "./shared/queue/redis";
+import { env } from "./shared/config/env";
 import { platformRoutes } from "./tenants/platform-routes";
 import { tenantRoutes } from "./tenants/routes";
 
 export const app = express();
 setResourceScopeRule(academicResourceScope);
 app.disable("x-powered-by");
+app.use(cors(env.CORS_ALLOWED_ORIGINS));
 app.use(express.json({ limit: "32kb" }));
 
 app.use("/api/v1", tenantRoutes);

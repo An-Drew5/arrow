@@ -11,3 +11,4 @@ process.env.PII_ENCRYPTION_KEY ??=
 process.env.JWT_ACCESS_TTL_SECONDS ??= "900";
 process.env.REFRESH_TOKEN_TTL_DAYS ??= "30";
 process.env.PLATFORM_ADMIN_EMAIL ??= "platform-admin@example.test";
+process.env.CORS_ALLOWED_ORIGINS ??= "https://frontend.example.test,http://localhost:5173";

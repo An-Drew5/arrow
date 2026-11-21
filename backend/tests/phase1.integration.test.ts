@@ -1295,7 +1295,7 @@ describe("Phase 1 tenant isolation", () => {
             status: attendanceStatuses[index]!,
           })),
         });
-      expect(attendanceRegister.status).toBe(200);
+      expect(attendanceRegister.status, JSON.stringify(attendanceRegister.body)).toBe(200);
       expect(attendanceRegister.body.submitted).toBe(true);
       const attendanceSummary = await request(app)
         .get(`/api/v1/attendance/summary?date=${attendanceDate}`)

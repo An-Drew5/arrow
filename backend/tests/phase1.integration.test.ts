@@ -1285,7 +1285,7 @@ describe("Phase 1 tenant isolation", () => {
       const attendanceDate = "2025-11-15";
       const attendanceStatuses = ["present", "late", "absent", "excused"] as const;
       const attendanceRegister = await request(app)
-        .post(`/api/v1/classes/${classId}/registers/${attendanceDate}`)
+        .put(`/api/v1/classes/${classId}/registers/${attendanceDate}`)
         .set(teacherAuthorization)
         .send({
           submit: true,

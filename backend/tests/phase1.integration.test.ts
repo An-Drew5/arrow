@@ -866,12 +866,13 @@ describe("Phase 1 tenant isolation", () => {
       expect(classTeacherRole).toBeDefined();
       expect(subjectTeacherRole).toBeDefined();
 
+      const newStaffEmail = `staff-${randomUUID()}@example.test`;
       const newStaff = await request(app)
         .post("/api/v1/users")
         .set(authorization)
         .send({
           name: "Staff User",
-          email: `staff-${randomUUID()}@example.test`,
+          email: newStaffEmail,
           password,
           roleIds: [classTeacherRole!.id],
         });
@@ -905,6 +906,29 @@ describe("Phase 1 tenant isolation", () => {
         status: "active",
         roles: ["subject_teacher"],
       });
+      const staffLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: newStaffEmail,
+        password,
+        schoolSlug: slug,
+      });
+      expect(staffLogin.status).toBe(200);
+      const changedPassword = await request(app)
+        .post("/api/v1/auth/change-password")
+        .set("Authorization", `****** as string}`)
+        .send({ currentPassword: password, newPassword: "Staff-new-password-43!" });
+      expect(changedPassword.status).toBe(204);
+      const oldStaffLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: newStaffEmail,
+        password,
+        schoolSlug: slug,
+      });
+      expect(oldStaffLogin.status).toBe(401);
+      const newStaffLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: newStaffEmail,
+        password: "Staff-new-password-43!",
+        schoolSlug: slug,
+      });
+      expect(newStaffLogin.status).toBe(200);
 
       const selfMember = staffList.body.items.find(
         (item: { email: string }) => item.email === email,
@@ -1087,6 +1111,32 @@ describe("Phase 1 tenant isolation", () => {
           roleIds: [subjectTeacherRole!.id],
         });
       expect(subjectOnlyTeacher.status).toBe(201);
+      const resetIssued = await request(app)
+        .post(`/api/v1/users/${subjectOnlyTeacher.body.membershipId}/password-reset`)
+        .set(authorization)
+        .send({});
+      expect(resetIssued.status).toBe(201);
+      expect(resetIssued.body.resetToken).toMatch(/^[0-9a-f]{64}$/);
+      const passwordReset = await request(app)
+        .post("/api/v1/auth/reset-password")
+        .send({
+          resetToken: resetIssued.body.resetToken,
+          newPassword: "Teacher-reset-password-44!",
+        });
+      expect(passwordReset.status).toBe(204);
+      const resetReplay = await request(app)
+        .post("/api/v1/auth/reset-password")
+        .send({
+          resetToken: resetIssued.body.resetToken,
+          newPassword: "Teacher-reset-password-44!",
+        });
+      expect(resetReplay.status).toBe(401);
+      const resetTeacherLogin = await request(app).post("/api/v1/auth/login").send({
+        identifier: subjectOnlyTeacherEmail,
+        password: "Teacher-reset-password-44!",
+        schoolSlug: slug,
+      });
+      expect(resetTeacherLogin.status).toBe(200);
       const invalidAllSubjectsAssignment = await request(app)
         .post("/api/v1/teacher-assignments")
         .set(authorization)

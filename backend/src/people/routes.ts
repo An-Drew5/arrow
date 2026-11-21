@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { createHash, randomBytes } from "node:crypto";
 import argon2 from "argon2";
 import { sql } from "kysely";
 import { z } from "zod";
@@ -310,6 +311,55 @@ peopleRoutes.patch(
       },
     });
     response.json({ membershipId: membershipId.data, status: nextStatus });
+  }),
+);
+
+peopleRoutes.post(
+  "/users/:id/password-reset",
+  tenantContext,
+  requirePermission("users:manage"),
+  asyncHandler(async (request, response) => {
+    const membershipId = z.string().uuid().safeParse(request.params.id);
+    if (!membershipId.success) {
+      throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", membershipId.error.issues);
+    }
+    const body = z.object({}).strict().safeParse(request.body ?? {});
+    if (!body.success) {
+      throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", body.error.issues);
+    }
+    const { tx, claims } = (request as RequestWithTenant).tenantContext;
+    const resetToken = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(resetToken).digest("hex");
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const updated = await sql<{ id: string }>`
+      UPDATE users
+      SET password_reset_token_hash = ${tokenHash},
+        password_reset_expires_at = ${expiresAt.toISOString()}::timestamptz,
+        password_reset_school_id = ${claims.schoolId!}::uuid,
+        password_reset_issued_by = ${claims.userId}::uuid
+      WHERE id = (
+        SELECT user_id FROM memberships
+        WHERE school_id = ${claims.schoolId!}::uuid
+          AND id = ${membershipId.data}::uuid
+      )
+      RETURNING id
+    `.execute(tx);
+    const targetUser = updated.rows[0];
+    if (!targetUser) {
+      throw new HttpError(404, "NOT_FOUND", "Staff membership not found");
+    }
+    await recordAudit(tx, {
+      schoolId: claims.schoolId!,
+      userId: claims.userId,
+      action: "user.password_reset_issued",
+      resourceType: "user",
+      resourceId: targetUser.id,
+      metadata: { membershipId: membershipId.data, expiresAt: expiresAt.toISOString() },
+    });
+    response.status(201).json({
+      resetToken,
+      expiresAt: expiresAt.toISOString(),
+    });
   }),
 );
 

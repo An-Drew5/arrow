@@ -1110,7 +1110,7 @@ describe("Phase 1 tenant isolation", () => {
       const enrollment = await request(app)
         .post(`/api/v1/students/${studentId}/enrollments`)
         .set(authorization)
-        .send({ academicYearId, classId });
+        .send({ academicYearId, classId, startDate: "2025-09-01" });
       expect(enrollment.status).toBe(201);
 
       for (const [index, firstName] of ["Kojo", "Abena", "Yaw"].entries()) {
@@ -1130,7 +1130,7 @@ describe("Phase 1 tenant isolation", () => {
         const enrolled = await request(app)
           .post(`/api/v1/students/${id}/enrollments`)
           .set(authorization)
-          .send({ academicYearId, classId });
+          .send({ academicYearId, classId, startDate: "2025-09-01" });
         expect(enrolled.status).toBe(201);
       }
 

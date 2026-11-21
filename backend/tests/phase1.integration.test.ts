@@ -1702,6 +1702,13 @@ describe("Phase 1 tenant isolation", () => {
           }
           if (allClassIds.length > 0) {
             await client.query("DELETE FROM teacher_assignments WHERE class_id = ANY($1::uuid[])", [allClassIds]);
+            await client.query(
+              `DELETE FROM attendance_versions WHERE attendance_id IN (
+                SELECT id FROM attendance WHERE class_id = ANY($1::uuid[])
+              )`,
+              [allClassIds],
+            );
+            await client.query("DELETE FROM attendance_registers WHERE class_id = ANY($1::uuid[])", [allClassIds]);
           }
           if (studentId) {
             await client.query("DELETE FROM guardians WHERE student_id = $1", [studentId]);

@@ -5,6 +5,7 @@ import { recordAudit } from "../audit/service";
 import { recomputeTermAttendance } from "./result-service";
 import { HttpError } from "../shared/errors/http-error";
 import { asyncHandler } from "../shared/middleware/async-handler";
+import { requirePermission } from "../shared/middleware/require-permission";
 import { tenantContext } from "../shared/middleware/tenant-context";
 import type { RequestWithTenant } from "../shared/middleware/request-context";
 import { can } from "../shared/rbac/can";
@@ -43,6 +44,89 @@ function actor(request: RequestWithTenant) {
     membershipId: claims.membershipId!,
   };
 }
+
+attendanceRoutes.get(
+  "/attendance/summary",
+  requirePermission("attendance:read"),
+  asyncHandler(async (request, response) => {
+    const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(
+      (value) => {
+        const date = new Date(`${value}T00:00:00.000Z`);
+        return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+      },
+      "Invalid calendar date",
+    );
+    const query = z.object({ date: dateSchema }).strict().safeParse(request.query);
+    if (!query.success) {
+      throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", query.error.issues);
+    }
+
+    const tenantRequest = request as RequestWithTenant;
+    const currentActor = actor(tenantRequest);
+    const { tx } = context(tenantRequest);
+    const rows = await sql<{
+      class_id: string;
+      class_name: string;
+      academic_year_id: string;
+      enrolled_count: number;
+      present_count: number;
+      late_count: number;
+      absent_count: number;
+      excused_count: number;
+      register_submitted: boolean;
+    }>`
+      SELECT c.id AS class_id, c.name AS class_name,
+        c.academic_year_id,
+        count(DISTINCT e.student_id)::int AS enrolled_count,
+        count(DISTINCT a.student_id) FILTER (WHERE a.status = 'present')::int AS present_count,
+        count(DISTINCT a.student_id) FILTER (WHERE a.status = 'late')::int AS late_count,
+        count(DISTINCT a.student_id) FILTER (WHERE a.status = 'absent')::int AS absent_count,
+        count(DISTINCT a.student_id) FILTER (WHERE a.status = 'excused')::int AS excused_count,
+        coalesce(bool_or(ar.status = 'submitted'), false) AS register_submitted
+      FROM classes c
+      JOIN academic_years ay
+        ON ay.school_id = c.school_id AND ay.id = c.academic_year_id
+      LEFT JOIN enrollments e
+        ON e.school_id = c.school_id AND e.class_id = c.id
+        AND e.academic_year_id = c.academic_year_id AND e.status = 'active'
+        AND e.start_date <= ${query.data.date}::date
+        AND (e.end_date IS NULL OR e.end_date >= ${query.data.date}::date)
+      LEFT JOIN attendance_registers ar
+        ON ar.school_id = c.school_id AND ar.class_id = c.id
+        AND ar.register_date = ${query.data.date}::date
+      LEFT JOIN attendance a
+        ON a.school_id = e.school_id AND a.register_id = ar.id
+        AND a.student_id = e.student_id
+      WHERE c.school_id = ${currentActor.schoolId}::uuid
+        AND EXISTS (
+          SELECT 1 FROM terms t
+          WHERE t.school_id = c.school_id
+            AND t.academic_year_id = c.academic_year_id
+            AND ${query.data.date}::date BETWEEN t.start_date AND t.end_date
+        )
+      GROUP BY c.id, c.name, c.academic_year_id
+      ORDER BY c.name, c.id
+    `.execute(tx);
+
+    const visibleClasses = [];
+    for (const row of rows.rows) {
+      if (await can(currentActor, "attendance:read", tx, { type: "class", id: row.class_id })) {
+        visibleClasses.push({
+          classId: row.class_id,
+          className: row.class_name,
+          academicYearId: row.academic_year_id,
+          enrolledCount: row.enrolled_count,
+          presentCount: row.present_count,
+          lateCount: row.late_count,
+          absentCount: row.absent_count,
+          excusedCount: row.excused_count,
+          registerSubmitted: row.register_submitted,
+        });
+      }
+    }
+    response.json({ date: query.data.date, items: visibleClasses });
+  }),
+);
 
 async function authorizeClass(
   request: RequestWithTenant,

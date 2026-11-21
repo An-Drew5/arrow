@@ -1092,6 +1092,36 @@ describe("Phase 1 tenant isolation", () => {
       expect(teacherAssessments.body.items).toHaveLength(15);
 
       const pupilIds = [studentId!, ...additionalStudentIds];
+      const attendanceDate = "2025-11-15";
+      const attendanceStatuses = ["present", "late", "absent", "excused"] as const;
+      const attendanceRegister = await request(app)
+        .post(`/api/v1/classes/${classId}/registers/${attendanceDate}`)
+        .set(authorization)
+        .send({
+          submit: true,
+          items: pupilIds.map((id, index) => ({
+            clientId: randomUUID(),
+            studentId: id,
+            status: attendanceStatuses[index]!,
+          })),
+        });
+      expect(attendanceRegister.status).toBe(200);
+      expect(attendanceRegister.body.submitted).toBe(true);
+      const attendanceSummary = await request(app)
+        .get(`/api/v1/attendance/summary?date=${attendanceDate}`)
+        .set(authorization);
+      expect(attendanceSummary.status).toBe(200);
+      expect(attendanceSummary.body.items).toEqual([
+        expect.objectContaining({
+          classId,
+          enrolledCount: 4,
+          presentCount: 1,
+          lateCount: 1,
+          absentCount: 1,
+          excusedCount: 1,
+          registerSubmitted: true,
+        }),
+      ]);
       const englishId = subjectId!;
       const mathsId = mathsSubjectId!;
       const scienceId = scienceSubjectId!;

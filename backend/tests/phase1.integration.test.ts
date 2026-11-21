@@ -1286,7 +1286,7 @@ describe("Phase 1 tenant isolation", () => {
       const attendanceStatuses = ["present", "late", "absent", "excused"] as const;
       const attendanceRegister = await request(app)
         .post(`/api/v1/classes/${classId}/registers/${attendanceDate}`)
-        .set(authorization)
+        .set(teacherAuthorization)
         .send({
           submit: true,
           items: pupilIds.map((id, index) => ({
@@ -1299,7 +1299,7 @@ describe("Phase 1 tenant isolation", () => {
       expect(attendanceRegister.body.submitted).toBe(true);
       const attendanceSummary = await request(app)
         .get(`/api/v1/attendance/summary?date=${attendanceDate}`)
-        .set(authorization);
+        .set(teacherAuthorization);
       expect(attendanceSummary.status).toBe(200);
       expect(attendanceSummary.body.items).toEqual([
         expect.objectContaining({

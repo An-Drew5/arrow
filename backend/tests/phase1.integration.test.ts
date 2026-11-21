@@ -948,7 +948,7 @@ describe("Phase 1 tenant isolation", () => {
         .post("/api/v1/auth/change-password")
         .set("Authorization", `****** as string}`)
         .send({ currentPassword: password, newPassword: "Staff-new-password-43!" });
-      expect(changedPassword.status).toBe(204);
+      expect(changedPassword.status, changedPassword.body.message ?? changedPassword.body.code).toBe(204);
       const oldStaffLogin = await request(app).post("/api/v1/auth/login").send({
         identifier: newStaffEmail,
         password,

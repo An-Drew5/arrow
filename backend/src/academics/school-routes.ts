@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import { sql } from "kysely";
 import { z } from "zod";
 import { recordAudit } from "../audit/service";
@@ -33,6 +33,83 @@ const profilePatchSchema = z.object({
 
 export const schoolRoutes = Router();
 schoolRoutes.use(tenantContext);
+
+const logoContentTypeSchema = z.enum(["image/png", "image/jpeg"]);
+const logoBodySchema = z.object({
+  contentType: logoContentTypeSchema,
+  data: z.instanceof(Buffer).refine(
+    (data) => data.length > 0 && data.length <= 1024 * 1024,
+    "Logo must be between 1 byte and 1 MB",
+  ),
+}).strict();
+const logoUploadBody = express.raw({
+  type: ["image/png", "image/jpeg"],
+  limit: 1024 * 1024,
+});
+const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+schoolRoutes.post(
+  "/school/logo",
+  requirePermission("settings:manage"),
+  logoUploadBody,
+  asyncHandler(async (request, response) => {
+    const contentType = request.header("content-type")?.split(";")[0];
+    const parsed = logoBodySchema.safeParse({
+      contentType,
+      data: request.body,
+    });
+    if (!parsed.success) {
+      throw new HttpError(400, "VALIDATION_ERROR", "Request validation failed", parsed.error.issues);
+    }
+    const { contentType: validatedType, data } = parsed.data;
+    const validSignature = validatedType === "image/png"
+      ? data.subarray(0, pngSignature.length).equals(pngSignature)
+      : data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+    if (!validSignature) {
+      throw new HttpError(400, "INVALID_IMAGE", "File contents do not match the declared image type");
+    }
+
+    const { claims, tx } = (request as RequestWithTenant).tenantContext;
+    const schoolId = claims.schoolId!;
+    await sql`
+      UPDATE school_settings
+      SET logo_data = ${data}, logo_content_type = ${validatedType}, logo_updated_at = now()
+      WHERE school_id = ${schoolId}::uuid
+    `.execute(tx);
+    await recordAudit(tx, {
+      schoolId,
+      userId: claims.userId,
+      action: "school.logo_updated",
+      resourceType: "school_settings",
+      resourceId: schoolId,
+      metadata: { contentType: validatedType, sizeBytes: data.length },
+    });
+    response.status(204).end();
+  }),
+);
+
+schoolRoutes.get(
+  "/school/logo",
+  requirePermission("students:read"),
+  asyncHandler(async (request, response) => {
+    const { claims, tx } = (request as RequestWithTenant).tenantContext;
+    const result = await sql<{
+      logo_data: Buffer | null;
+      logo_content_type: string | null;
+    }>`
+      SELECT logo_data, logo_content_type FROM school_settings
+      WHERE school_id = ${claims.schoolId!}::uuid
+    `.execute(tx);
+    const logo = result.rows[0];
+    if (!logo?.logo_data || !logo.logo_content_type) {
+      throw new HttpError(404, "NOT_FOUND", "School logo not found");
+    }
+    response
+      .setHeader("Cache-Control", "private, max-age=300")
+      .type(logo.logo_content_type)
+      .send(logo.logo_data);
+  }),
+);
 
 schoolRoutes.get(
   "/school/settings",

@@ -825,6 +825,38 @@ describe("Phase 1 tenant isolation", () => {
       expect(me.body.school.id).toBe(schoolId);
 
       const authorization = { Authorization: `Bearer ${login.body.accessToken}` };
+      const logoBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+      const uploadedLogo = await request(app)
+        .post("/api/v1/school/logo")
+        .set(authorization)
+        .set("Content-Type", "image/png")
+        .send(logoBytes);
+      expect(uploadedLogo.status).toBe(204);
+      const logoResponse = await request(app)
+        .get("/api/v1/school/logo")
+        .set(authorization)
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk: Buffer) => chunks.push(chunk));
+          response.on("end", () => callback(null, Buffer.concat(chunks)));
+        });
+      expect(logoResponse.status).toBe(200);
+      expect(logoResponse.headers["content-type"]).toContain("image/png");
+      expect(Buffer.compare(logoResponse.body as Buffer, logoBytes)).toBe(0);
+      const invalidLogo = await request(app)
+        .post("/api/v1/school/logo")
+        .set(authorization)
+        .set("Content-Type", "image/png")
+        .send(Buffer.from("not an image"));
+      expect(invalidLogo.status).toBe(400);
+      const oversizedLogo = await request(app)
+        .post("/api/v1/school/logo")
+        .set(authorization)
+        .set("Content-Type", "image/png")
+        .send(Buffer.alloc(1024 * 1024 + 1, 0x01));
+      expect(oversizedLogo.status).toBe(413);
+
       const year = await request(app)
         .post("/api/v1/academic-years")
         .set(authorization)

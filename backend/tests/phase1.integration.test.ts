@@ -831,6 +831,20 @@ describe("Phase 1 tenant isolation", () => {
         .send({ name: "2025-2027", startDate: "2025-09-01", endDate: "2027-07-31" });
       expect(year.status).toBe(201);
       academicYearId = year.body.id as string;
+      const updatedYear = await request(app)
+        .patch(`/api/v1/academic-years/${academicYearId}`)
+        .set(authorization)
+        .send({ name: "2025-2027 Updated", endDate: "2027-07-30" });
+      expect(updatedYear.status).toBe(200);
+      expect(updatedYear.body).toMatchObject({
+        name: "2025-2027 Updated",
+        endDate: "2027-07-30",
+      });
+      const restoredYear = await request(app)
+        .patch(`/api/v1/academic-years/${academicYearId}`)
+        .set(authorization)
+        .send({ name: "2025-2027", endDate: "2027-07-31" });
+      expect(restoredYear.status).toBe(200);
       const roles = await request(app).get("/api/v1/roles").set(authorization);
       expect(roles.status).toBe(200);
       expect(roles.body.items).toEqual(expect.arrayContaining([
@@ -909,6 +923,30 @@ describe("Phase 1 tenant isolation", () => {
         .send({ name: "Term 1", termNumber: 1, startDate: "2025-09-01", endDate: "2025-12-19" });
       expect(term.status).toBe(201);
       termId = term.body.id as string;
+      const updatedTerm = await request(app)
+        .patch(`/api/v1/terms/${termId}`)
+        .set(authorization)
+        .send({
+          name: "Term One",
+          startDate: "2025-09-02",
+          endDate: "2025-12-20",
+          status: "locked",
+        });
+      expect(updatedTerm.status).toBe(200);
+      expect(updatedTerm.body).toMatchObject({
+        name: "Term One",
+        status: "locked",
+      });
+      const restoredTerm = await request(app)
+        .patch(`/api/v1/terms/${termId}`)
+        .set(authorization)
+        .send({
+          name: "Term 1",
+          startDate: "2025-09-01",
+          endDate: "2025-12-19",
+          status: "open",
+        });
+      expect(restoredTerm.status).toBe(200);
 
       const classroom = await request(app)
         .post("/api/v1/classes")
@@ -916,6 +954,29 @@ describe("Phase 1 tenant isolation", () => {
         .send({ academicYearId, name: "Basic 1 A", level: 1, stream: "A" });
       expect(classroom.status).toBe(201);
       classId = classroom.body.id as string;
+      const renamedClass = await request(app)
+        .patch(`/api/v1/classes/${classId}`)
+        .set(authorization)
+        .send({ name: "Basic 1 A Renamed" });
+      expect(renamedClass.status).toBe(200);
+      expect(renamedClass.body.name).toBe("Basic 1 A Renamed");
+      const archivedClass = await request(app)
+        .patch(`/api/v1/classes/${classId}/archive`)
+        .set(authorization)
+        .send({});
+      expect(archivedClass.status).toBe(200);
+      expect(archivedClass.body.status).toBe("archived");
+      const unarchivedClass = await request(app)
+        .patch(`/api/v1/classes/${classId}/unarchive`)
+        .set(authorization)
+        .send({});
+      expect(unarchivedClass.status).toBe(200);
+      expect(unarchivedClass.body.status).toBe("active");
+      const restoredClass = await request(app)
+        .patch(`/api/v1/classes/${classId}`)
+        .set(authorization)
+        .send({ name: "Basic 1 A" });
+      expect(restoredClass.status).toBe(200);
 
       const subject = await request(app)
         .post("/api/v1/subjects")

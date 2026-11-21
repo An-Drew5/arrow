@@ -22,6 +22,14 @@ const yearSchema = z.object({
   endDate: dateSchema,
   status: z.enum(["open", "closed"]).default("open"),
 }).strict();
+const yearUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(80).optional(),
+  startDate: dateSchema.optional(),
+  endDate: dateSchema.optional(),
+  status: z.enum(["open", "closed"]).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, {
+  message: "At least one field must be provided",
+});
 const termSchema = z.object({
   name: z.string().trim().min(2).max(80),
   termNumber: z.number().int().min(1).max(3),
@@ -30,12 +38,31 @@ const termSchema = z.object({
   vacationDate: dateSchema.nullable().optional(),
   nextTermBegins: dateSchema.nullable().optional(),
 }).strict();
+const termUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(80).optional(),
+  termNumber: z.number().int().min(1).max(3).optional(),
+  startDate: dateSchema.optional(),
+  endDate: dateSchema.optional(),
+  vacationDate: dateSchema.nullable().optional(),
+  nextTermBegins: dateSchema.nullable().optional(),
+  status: z.enum(["open", "locked"]).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, {
+  message: "At least one field must be provided",
+});
 const classSchema = z.object({
   academicYearId: idSchema,
   name: z.string().trim().min(1).max(80),
   level: z.number().int().min(1).max(9),
   stream: z.string().trim().max(40).nullable().optional(),
 }).strict();
+const classUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  level: z.number().int().min(1).max(9).optional(),
+  stream: z.string().trim().max(40).nullable().optional(),
+  status: z.enum(["active", "archived"]).optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, {
+  message: "At least one field must be provided",
+});
 const subjectSchema = z.object({
   name: z.string().trim().min(1).max(100),
   code: z.string().trim().min(1).max(20).toUpperCase(),
@@ -228,6 +255,57 @@ academicsRoutes.post("/academic-years", ...route("academics:manage", async (requ
   response.status(201).json({ id, ...input });
 }));
 
+academicsRoutes.patch("/academic-years/:id", ...route("academics:manage", async (request, response) => {
+  const id = parseId(request.params.id);
+  const input = parseBody(yearUpdateSchema, request.body);
+  const { tx } = context(request);
+  const { schoolId, userId } = actor(request);
+  const existing = await sql<{
+    id: string;
+    name: string;
+    start_date: string;
+    end_date: string;
+    status: string;
+  }>`
+    SELECT id, name, start_date::text, end_date::text, status
+    FROM academic_years
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+    FOR UPDATE
+  `.execute(tx);
+  const year = existing.rows[0];
+  if (!year) throw new HttpError(404, "NOT_FOUND", "Academic year not found");
+  const startDate = input.startDate ?? year.start_date;
+  const endDate = input.endDate ?? year.end_date;
+  if (startDate > endDate) {
+    throw new HttpError(400, "VALIDATION_ERROR", "startDate must not be after endDate");
+  }
+  const status = input.status ?? year.status;
+  if (status === "open") {
+    const alreadyOpen = await sql`
+      SELECT id FROM academic_years
+      WHERE school_id = ${schoolId}::uuid AND status = 'open' AND id <> ${id}::uuid
+    `.execute(tx);
+    if (alreadyOpen.rows[0]) {
+      throw new HttpError(409, "OPEN_ACADEMIC_YEAR_EXISTS", "Another academic year is already open");
+    }
+  }
+  await sql`
+    UPDATE academic_years
+    SET name = ${input.name ?? year.name},
+      start_date = ${startDate}::date, end_date = ${endDate}::date, status = ${status}
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+  `.execute(tx);
+  await recordAudit(tx, {
+    schoolId,
+    userId,
+    action: "academic_year.updated",
+    resourceType: "academic_year",
+    resourceId: id,
+    metadata: { name: input.name ?? year.name, startDate, endDate, status },
+  });
+  response.json({ id, name: input.name ?? year.name, startDate, endDate, status });
+}));
+
 academicsRoutes.get("/academic-years/:id/terms", ...route("students:read", async (request, response) => {
   const id = parseId(request.params.id);
   const { tx } = context(request);
@@ -279,6 +357,62 @@ academicsRoutes.get("/terms/:id", ...route("students:read", async (request, resp
   response.json(result.rows[0]);
 }));
 
+academicsRoutes.patch("/terms/:id", ...route("academics:manage", async (request, response) => {
+  const id = parseId(request.params.id);
+  const input = parseBody(termUpdateSchema, request.body);
+  const { tx } = context(request);
+  const { schoolId, userId } = actor(request);
+  const existing = await sql<{
+    id: string;
+    academic_year_id: string;
+    name: string;
+    term_number: number;
+    start_date: string;
+    end_date: string;
+    vacation_date: string | null;
+    next_term_begins: string | null;
+    status: string;
+  }>`
+    SELECT id, academic_year_id, name, term_number, start_date::text, end_date::text,
+      vacation_date::text, next_term_begins::text, status
+    FROM terms
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+    FOR UPDATE
+  `.execute(tx);
+  const term = existing.rows[0];
+  if (!term) throw new HttpError(404, "NOT_FOUND", "Term not found");
+  const startDate = input.startDate ?? term.start_date;
+  const endDate = input.endDate ?? term.end_date;
+  if (startDate > endDate) {
+    throw new HttpError(400, "VALIDATION_ERROR", "startDate must not be after endDate");
+  }
+  const updated = {
+    name: input.name ?? term.name,
+    termNumber: input.termNumber ?? term.term_number,
+    startDate,
+    endDate,
+    vacationDate: input.vacationDate === undefined ? term.vacation_date : input.vacationDate,
+    nextTermBegins: input.nextTermBegins === undefined ? term.next_term_begins : input.nextTermBegins,
+    status: input.status ?? term.status,
+  };
+  await sql`
+    UPDATE terms SET name = ${updated.name}, term_number = ${updated.termNumber},
+      start_date = ${updated.startDate}::date, end_date = ${updated.endDate}::date,
+      vacation_date = ${updated.vacationDate}::date,
+      next_term_begins = ${updated.nextTermBegins}::date, status = ${updated.status}
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+  `.execute(tx);
+  await recordAudit(tx, {
+    schoolId,
+    userId,
+    action: "term.updated",
+    resourceType: "term",
+    resourceId: id,
+    metadata: updated,
+  });
+  response.json({ id, academicYearId: term.academic_year_id, ...updated });
+}));
+
 academicsRoutes.post("/classes", ...route("academics:manage", async (request, response) => {
   const input = parseBody(classSchema, request.body);
   const { tx } = context(request);
@@ -295,12 +429,83 @@ academicsRoutes.post("/classes", ...route("academics:manage", async (request, re
   response.status(201).json({ id, ...input });
 }));
 
+academicsRoutes.patch("/classes/:id", ...route("academics:manage", async (request, response) => {
+  const id = parseId(request.params.id);
+  const input = parseBody(classUpdateSchema, request.body);
+  const { tx } = context(request);
+  const { schoolId, userId } = actor(request);
+  const existing = await sql<{
+    academic_year_id: string;
+    name: string;
+    level: number;
+    stream: string | null;
+    status: string;
+  }>`
+    SELECT academic_year_id, name, level, stream, status FROM classes
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid FOR UPDATE
+  `.execute(tx);
+  const classroom = existing.rows[0];
+  if (!classroom) throw new HttpError(404, "NOT_FOUND", "Class not found");
+  const updated = {
+    name: input.name ?? classroom.name,
+    level: input.level ?? classroom.level,
+    stream: input.stream === undefined ? classroom.stream : input.stream,
+    status: input.status ?? classroom.status,
+  };
+  await sql`
+    UPDATE classes SET name = ${updated.name}, level = ${updated.level},
+      stream = ${updated.stream}, status = ${updated.status}
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+  `.execute(tx);
+  await recordAudit(tx, {
+    schoolId,
+    userId,
+    action: "class.updated",
+    resourceType: "class",
+    resourceId: id,
+    metadata: updated,
+  });
+  response.json({ id, academicYearId: classroom.academic_year_id, ...updated });
+}));
+
+async function setClassStatus(
+  request: RequestWithTenant,
+  response: import("express").Response,
+  status: "active" | "archived",
+): Promise<void> {
+  parseBody(z.object({}).strict(), request.body ?? {});
+  const id = parseId(request.params.id);
+  const { tx } = context(request);
+  const { schoolId, userId } = actor(request);
+  const changed = await sql`
+    UPDATE classes SET status = ${status}
+    WHERE school_id = ${schoolId}::uuid AND id = ${id}::uuid
+    RETURNING id
+  `.execute(tx);
+  if (!changed.rows[0]) throw new HttpError(404, "NOT_FOUND", "Class not found");
+  await recordAudit(tx, {
+    schoolId,
+    userId,
+    action: status === "archived" ? "class.archived" : "class.unarchived",
+    resourceType: "class",
+    resourceId: id,
+  });
+  response.json({ id, status });
+}
+
+academicsRoutes.patch("/classes/:id/archive", ...route("academics:manage", (request, response) =>
+  setClassStatus(request, response, "archived"),
+));
+academicsRoutes.patch("/classes/:id/unarchive", ...route("academics:manage", (request, response) =>
+  setClassStatus(request, response, "active"),
+));
+
 academicsRoutes.get("/classes", ...route("students:read", async (request, response) => {
   const yearId = request.query.academicYearId ? parseId(String(request.query.academicYearId)) : undefined;
   const { tx } = context(request);
   const rows = yearId
-    ? await sql`SELECT id, academic_year_id AS "academicYearId", name, level, stream FROM classes WHERE academic_year_id = ${yearId}::uuid ORDER BY level, name`.execute(tx)
-    : await sql`SELECT id, academic_year_id AS "academicYearId", name, level, stream FROM classes ORDER BY level, name`.execute(tx);
+    ? await sql`SELECT id, academic_year_id AS "academicYearId", name, level, stream, status FROM classes WHERE academic_year_id = ${yearId}::uuid ORDER BY level, name`.execute(tx)
+    : await sql`SELECT id, academic_year_id AS "academicYearId", name, level, stream, status FROM classes ORDER BY level, name`.execute(tx);
   response.json({ items: rows.rows });
 }));
 
